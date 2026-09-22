@@ -60,6 +60,68 @@ export class XNoteView extends FileView {
 		this.registerDomEvent(window, "resize", () => {
 			if (this.fit) this.applyZoom();
 		});
+		this.setupGestures();
+	}
+
+	// Pinch-to-zoom: trackpad pinch / ctrl+wheel on desktop, two-finger pinch on touch.
+	private setupGestures(): void {
+		this.registerDomEvent(
+			this.pagesEl,
+			"wheel",
+			(e: WheelEvent) => {
+				if (!e.ctrlKey) return; // plain wheel scrolls; pinch/ctrl zooms
+				e.preventDefault();
+				this.zoomAt(this.zoom * Math.exp(-e.deltaY * 0.01), e.clientX, e.clientY);
+			},
+			{ passive: false },
+		);
+
+		let startDist = 0;
+		let startZoom = 1;
+		const dist = (t: TouchList) => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
+		const mid = (t: TouchList): [number, number] => [
+			(t[0].clientX + t[1].clientX) / 2,
+			(t[0].clientY + t[1].clientY) / 2,
+		];
+
+		this.registerDomEvent(this.pagesEl, "touchstart", (e: TouchEvent) => {
+			if (e.touches.length === 2) {
+				startDist = dist(e.touches);
+				startZoom = this.zoom;
+			}
+		});
+		this.registerDomEvent(
+			this.pagesEl,
+			"touchmove",
+			(e: TouchEvent) => {
+				if (e.touches.length !== 2 || startDist === 0) return;
+				e.preventDefault();
+				const [mx, my] = mid(e.touches);
+				this.zoomAt((startZoom * dist(e.touches)) / startDist, mx, my);
+			},
+			{ passive: false },
+		);
+		this.registerDomEvent(this.pagesEl, "touchend", (e: TouchEvent) => {
+			if (e.touches.length < 2) startDist = 0;
+		});
+	}
+
+	// Zoom to `z` while keeping the content point under (clientX, clientY) fixed.
+	private zoomAt(z: number, clientX: number, clientY: number): void {
+		const target = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, z));
+		const rect = this.pagesEl.getBoundingClientRect();
+		const offX = clientX - rect.left;
+		const offY = clientY - rect.top;
+		const contentX = this.pagesEl.scrollLeft + offX;
+		const contentY = this.pagesEl.scrollTop + offY;
+		const ratio = target / this.zoom;
+
+		this.fit = false;
+		this.zoom = target;
+		this.applyZoom();
+
+		this.pagesEl.scrollLeft = contentX * ratio - offX;
+		this.pagesEl.scrollTop = contentY * ratio - offY;
 	}
 
 	async onLoadFile(file: TFile): Promise<void> {

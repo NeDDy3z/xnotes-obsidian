@@ -33,6 +33,8 @@
 	align-items: center;
 	gap: 16px;
 	height: calc(100% - 37px);
+	/* Let one finger pan but reserve two-finger pinch for our zoom handler. */
+	touch-action: pan-x pan-y;
 }
 
 .xnote-page canvas {
