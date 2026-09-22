@@ -186,6 +186,8 @@ function compositeLayer(
 	blur: number,
 ): void {
 	if (alpha <= 0) return;
+	// Detached offscreen buffer: createEl would append it to the document, so use createElement.
+	// eslint-disable-next-line obsidianmd/prefer-create-el
 	const layer = ctx.canvas.ownerDocument.createElement("canvas");
 	layer.width = ctx.canvas.width;
 	layer.height = ctx.canvas.height;
