@@ -1,0 +1,9 @@
+{
+  "id": "xnotes-viewer",
+  "name": "xNotes Viewer",
+  "version": "0.1.0",
+  "minAppVersion": "1.13.0",
+  "description": "View .xnote handwritten notes from the xnotes Android app directly in your vault.",
+  "author": "Erik Vaněk",
+  "isDesktopOnly": false
+}

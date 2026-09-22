@@ -1,0 +1,48 @@
+.xnote-view .view-content {
+	padding: 0;
+}
+
+.xnote-toolbar {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 6px 10px;
+	border-bottom: 1px solid var(--background-modifier-border);
+	background: var(--background-secondary);
+	position: sticky;
+	top: 0;
+	z-index: 1;
+}
+
+.xnote-btn {
+	cursor: pointer;
+}
+
+.xnote-zoom-label {
+	min-width: 3.5em;
+	text-align: center;
+	color: var(--text-muted);
+	font-variant-numeric: tabular-nums;
+}
+
+.xnote-pages {
+	overflow: auto;
+	padding: 16px;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 16px;
+	height: calc(100% - 37px);
+}
+
+.xnote-page canvas {
+	display: block;
+	box-shadow: 0 1px 6px rgba(0, 0, 0, 0.25);
+	border-radius: 2px;
+}
+
+.xnote-error {
+	color: var(--text-error);
+	padding: 24px;
+	text-align: center;
+}

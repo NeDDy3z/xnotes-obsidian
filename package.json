@@ -1,0 +1,31 @@
+{
+  "name": "xnotes-obsidian",
+  "version": "0.1.0",
+  "description": "Read and view .xnote handwritten notes (from the xnotes Android app) inside Obsidian.",
+  "main": "main.js",
+  "type": "module",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "tsc --noEmit && node esbuild.config.mjs production"
+  },
+  "keywords": [
+    "obsidian",
+    "xnotes",
+    "xnote",
+    "handwriting",
+    "viewer"
+  ],
+  "license": "Apache-2.0",
+  "author": "Erik Vaněk",
+  "devDependencies": {
+    "esbuild": "^0.28.0",
+    "obsidian": "latest",
+    "typescript": "^5.7.0"
+  },
+  "dependencies": {
+    "fflate": "^0.8.2"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true
+  }
+}
