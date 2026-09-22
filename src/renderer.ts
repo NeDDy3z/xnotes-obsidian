@@ -186,7 +186,7 @@ function compositeLayer(
 	blur: number,
 ): void {
 	if (alpha <= 0) return;
-	const layer = document.createElement("canvas");
+	const layer = ctx.canvas.ownerDocument.createElement("canvas");
 	layer.width = ctx.canvas.width;
 	layer.height = ctx.canvas.height;
 	const lctx = layer.getContext("2d");
@@ -276,7 +276,7 @@ function drawNeon(
 	fillDiskRibbon(ctx, geom, `rgb(${lift(body[0])}, ${lift(body[1])}, ${lift(body[2])})`);
 	const core: StrokeGeometry = {
 		centerline: geom.centerline,
-		halfWidths: geom.halfWidths.map((h) => h * 0.3) as Float32Array,
+		halfWidths: geom.halfWidths.map((h) => h * 0.3),
 		leftRail: geom.leftRail,
 		rightRail: geom.rightRail,
 	};

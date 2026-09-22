@@ -35,11 +35,13 @@ jobs:
 
       - run: npm run build
 
-      # Signs main.js so anyone can confirm it was built from this repo at this commit:
-      #   gh attestation verify main.js -R ${{ github.repository }}
+      # Signs the shipped assets so anyone can confirm they were built from this repo
+      # at this commit:  gh attestation verify main.js -R ${{ github.repository }}
       - uses: actions/attest-build-provenance@v4
         with:
-          subject-path: main.js
+          subject-path: |
+            main.js
+            styles.css
 
       - name: Create the release
         env:

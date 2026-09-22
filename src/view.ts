@@ -198,19 +198,16 @@ export class XNoteView extends FileView {
 	// Zoom is applied purely via CSS width so re-rendering is not needed on zoom.
 	private applyZoom(): void {
 		if (this.fit) {
-			const first = this.pagesEl.querySelector("canvas") as HTMLCanvasElement | null;
+			const first = this.pagesEl.querySelector("canvas");
 			const avail = this.pagesEl.clientWidth - 24;
 			if (first && avail > 0) {
 				const base = Number(first.dataset.baseWidth) || first.width;
 				this.zoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, avail / base));
 			}
 		}
-		const canvases = this.pagesEl.querySelectorAll("canvas");
-		canvases.forEach((c) => {
-			const canvas = c as HTMLCanvasElement;
+		this.pagesEl.querySelectorAll("canvas").forEach((canvas) => {
 			const base = Number(canvas.dataset.baseWidth) || canvas.width;
-			canvas.style.width = `${base * this.zoom}px`;
-			canvas.style.height = "auto";
+			canvas.setCssStyles({ width: `${base * this.zoom}px`, height: "auto" });
 		});
 		this.zoomLabel.setText(`${Math.round(this.zoom * 100)}%`);
 	}

@@ -1,4 +1,4 @@
-import { Plugin, PluginSettingTab, Setting, type App } from "obsidian";
+import { Plugin, PluginSettingTab, type App, type SettingDefinitionItem } from "obsidian";
 import { VIEW_TYPE_XNOTE, XNoteView } from "./view.ts";
 
 interface XNotesSettings {
@@ -44,21 +44,30 @@ class XNotesSettingTab extends PluginSettingTab {
 		this.plugin = plugin;
 	}
 
-	display(): void {
-		this.containerEl.empty();
+	getSettingDefinitions(): SettingDefinitionItem[] {
+		return [
+			{
+				name: "Render quality",
+				desc: "Extra resolution multiplier on top of your display scaling. Higher is crisper but uses more memory. Reopen a note to apply.",
+				control: {
+					type: "slider",
+					key: "renderScale",
+					min: 1,
+					max: 3,
+					step: 1,
+					defaultValue: DEFAULT_SETTINGS.renderScale,
+				},
+			},
+		];
+	}
 
-		new Setting(this.containerEl)
-			.setName("Render quality")
-			.setDesc("Extra resolution multiplier on top of your display scaling. Higher is crisper but uses more memory. Reopen a note to apply.")
-			.addSlider((s) =>
-				s
-					.setLimits(1, 3, 1)
-					.setValue(this.plugin.settings.renderScale)
-					.setDynamicTooltip()
-					.onChange(async (v) => {
-						this.plugin.settings.renderScale = v;
-						await this.plugin.saveSettings();
-					}),
-			);
+	getControlValue(key: string): unknown {
+		if (key === "renderScale") return this.plugin.settings.renderScale;
+		return undefined;
+	}
+
+	async setControlValue(key: string, value: unknown): Promise<void> {
+		if (key === "renderScale") this.plugin.settings.renderScale = Number(value);
+		await this.plugin.saveSettings();
 	}
 }
