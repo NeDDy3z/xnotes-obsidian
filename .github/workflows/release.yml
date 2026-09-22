@@ -1,0 +1,66 @@
+name: Release
+
+# Cut a release by pushing a tag that matches the manifest version, e.g. `git tag 0.1.0 && git push origin 0.1.0`.
+on:
+  push:
+    tags:
+      - "[0-9]+.[0-9]+.[0-9]+"
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+
+      - run: npm ci
+
+      # Obsidian requires the release tag and manifest.json version to be identical.
+      - name: Check the tag matches manifest.json
+        run: |
+          version=$(node -p "require('./manifest.json').version")
+          if [ "$version" != "$GITHUB_REF_NAME" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match manifest version $version" >&2
+            exit 1
+          fi
+
+      - run: npm run build
+
+      # Signs main.js so anyone can confirm it was built from this repo at this commit:
+      #   gh attestation verify main.js -R ${{ github.repository }}
+      - uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: main.js
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          cat > notes.md <<EOF
+          Read-only viewer for \`.xnote\` handwritten notes from the [xnotes Android app](https://github.com/shardulvs/xnotes-android).
+
+          ## Install
+
+          Install with [BRAT](https://github.com/TfTHacker/obsidian42-brat) using \`$REPO\`, or download \`main.js\`, \`manifest.json\` and \`styles.css\` below into \`<your vault>/.obsidian/plugins/xnotes-viewer/\` and restart Obsidian.
+
+          ## Verifying this build
+
+          \`main.js\` was built by GitHub Actions from this repository and signed, so you can check it yourself:
+
+          \`\`\`
+          gh attestation verify main.js -R $REPO
+          \`\`\`
+
+          **Commits**: https://github.com/$REPO/commits/$GITHUB_REF_NAME
+          EOF
+          gh release create "$GITHUB_REF_NAME" main.js manifest.json styles.css --title "$GITHUB_REF_NAME" --notes-file notes.md
