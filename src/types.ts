@@ -9,17 +9,25 @@ export interface StrokeConfig {
 	pressure_min_factor: number;
 	direction_strength: number;
 	rgba: Rgba;
-	highlighter_alpha?: number;
+	speed_strength?: number;
+	taper_enabled?: boolean;
+	taper_min_factor?: number;
+	neon?: boolean;
+	neon_strength?: number;
 	dash_length?: number;
 	dash_gap?: number;
+	highlighter_alpha?: number;
+	highlighter_inverse?: boolean;
 }
 
 export interface StrokeItem {
 	kind: "stroke";
-	tool: string; // "pen", "dashed", "calligraphy", "highlighter", ...
+	tool: string; // "pen", "dashed", "calligraphy", "speed", "taper", "highlighter"
 	config: StrokeConfig;
-	samples: number[][]; // [x, y, pressure]
+	samples: number[][]; // [x, y, p] or [x, y, p, t]
 	smooth_scale?: number;
+	straight?: boolean;
+	speed_scale?: number;
 }
 
 export interface ShapeItem {
@@ -31,6 +39,9 @@ export interface ShapeItem {
 	stroke_width: number;
 	fill_rgba: Rgba | null;
 	points?: number[][]; // absolute px vertices for polygon / polyline / curve
+	neon?: boolean;
+	neon_strength?: number;
+	dashed?: boolean;
 	dash_length?: number;
 	dash_gap?: number;
 }
@@ -54,6 +65,8 @@ export interface TableItem {
 	stroke_width: number;
 }
 
+export type TextAlign = "left" | "center" | "right";
+
 export interface TextItem {
 	kind: "text";
 	pos: Point; // top-left
@@ -61,8 +74,13 @@ export interface TextItem {
 	text: string;
 	rgba: Rgba;
 	point_size: number;
-	height: number;
+	height?: number;
 	font_face?: string; // "mono" (default) | "sans" | "serif" | "hand"
+	bold?: boolean;
+	italic?: boolean;
+	underline?: boolean;
+	strike?: boolean;
+	align?: TextAlign;
 }
 
 export type Item = StrokeItem | ShapeItem | ImageItem | TableItem | TextItem;
@@ -72,6 +90,7 @@ export interface Page {
 	height: number;
 	pdf_page: number | null;
 	items: Item[];
+	style?: PageStyle; // per-page override of the document style
 }
 
 export interface PageStyle {
