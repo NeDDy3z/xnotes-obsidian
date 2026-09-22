@@ -6,7 +6,7 @@ An `.xnote` is a ZIP holding a `manifest.json` of vector pages (strokes, shapes,
 
 ## Install
 
-Not in the community list yet. With [BRAT](https://github.com/TfTHacker/obsidian42-brat): add beta plugin `NeDDy3z/xnotes-obsidian`, then enable it. By hand: download `main.js`, `manifest.json` and `styles.css` from the latest release into `<vault>/.obsidian/plugins/xnotes-viewer/`, then reload and enable.
+Settings, Community plugins, Browse, search for "xNotes Viewer", install and enable. By hand: download `main.js`, `manifest.json` and `styles.css` from the latest release into `<vault>/.obsidian/plugins/xnotes-viewer/`, then reload and enable.
 
 ## Development
 
