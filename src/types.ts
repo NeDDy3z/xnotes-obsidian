@@ -32,18 +32,19 @@ export interface StrokeItem {
 
 export interface ShapeItem {
 	kind: "shape";
-	shape: string; // "line", "arrow", "rectangle", "ellipse", "triangle", "polygon", "axes", ...
+	shape: string; // "line", "arrow", "rectangle", "ellipse", "triangle", "polygon", "axes", "numberline", "spline", ...
 	start: Point;
 	end: Point;
 	stroke_rgba: Rgba | null;
 	stroke_width: number;
 	fill_rgba: Rgba | null;
-	points?: number[][]; // absolute px vertices for polygon / polyline / curve
+	points?: number[][]; // absolute px vertices for polygon / polyline / curve, control points for spline
 	neon?: boolean;
 	neon_strength?: number;
 	dashed?: boolean;
 	dash_length?: number;
 	dash_gap?: number;
+	angle?: number; // radians, clockwise, about the box center; axes only
 }
 
 export interface ImageItem {

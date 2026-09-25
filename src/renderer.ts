@@ -360,13 +360,16 @@ function drawShape(ctx: CanvasRenderingContext2D, item: ShapeItem): void {
 	const fill = item.fill_rgba;
 
 	const path = new Path2D();
+	const solid = new Path2D();
 	switch (item.shape) {
 		case "line":
 			path.moveTo(sx, sy);
 			path.lineTo(ex, ey);
 			break;
 		case "arrow":
-			drawArrow(path, sx, sy, ex, ey);
+			path.moveTo(sx, sy);
+			path.lineTo(ex, ey);
+			drawArrowHead(solid, sx, sy, ex, ey, item.stroke_width);
 			break;
 		case "rectangle":
 			path.rect(x, y, w, h);
@@ -383,18 +386,28 @@ function drawShape(ctx: CanvasRenderingContext2D, item: ShapeItem): void {
 			break;
 		case "polygon":
 		case "polyline":
+		case "curve":
 			if (item.points && item.points.length) {
 				path.moveTo(item.points[0][0], item.points[0][1]);
 				for (let i = 1; i < item.points.length; i++) path.lineTo(item.points[i][0], item.points[i][1]);
 				if (item.shape === "polygon") path.closePath();
 			}
 			break;
+		case "spline":
+			drawSpline(path, item);
+			break;
 		case "axes":
+			if (item.angle) {
+				const cx = x + w / 2,
+					cy = y + h / 2;
+				ctx.translate(cx, cy);
+				ctx.rotate(item.angle);
+				ctx.translate(-cx, -cy);
+			}
 			drawAxes(path, x, y, w, h, item.stroke_width);
 			break;
-		case "curve":
-			path.moveTo(sx, sy);
-			path.quadraticCurveTo((sx + ex) / 2, y, ex, ey);
+		case "numberline":
+			drawNumberLine(path, sx, sy, ex, ey, item.stroke_width);
 			break;
 		default:
 			path.rect(x, y, w, h);
@@ -406,7 +419,16 @@ function drawShape(ctx: CanvasRenderingContext2D, item: ShapeItem): void {
 		ctx.fill(path);
 	}
 	ctx.stroke(path);
+	ctx.setLineDash([]);
+	ctx.stroke(solid);
 	ctx.restore();
+}
+
+// Arrowhead length and tick half-length for the axes and the number line, scaled to `extent`.
+function markSizes(extent: number, strokeWidth: number): [number, number] {
+	const head = Math.max(5, Math.min(strokeWidth * 1.7, extent * 0.08));
+	const tick = Math.max(strokeWidth * 0.8, Math.min(head * 0.45, extent * 0.025));
+	return [head, tick];
 }
 
 // X-Y coordinate axes: full-width and full-height lines through the box centre, an
@@ -418,8 +440,7 @@ function drawAxes(path: Path2D, x: number, y: number, w: number, h: number, stro
 		bottom = y + h;
 	const cx = x + w / 2,
 		cy = y + h / 2;
-	const head = Math.max(8, Math.min(strokeWidth * 3, Math.min(w, h) * 0.15));
-	const tick = Math.max(3, Math.min(head * 0.5, Math.min(w, h) * 0.04));
+	const [head, tick] = markSizes(Math.min(w, h), strokeWidth);
 
 	path.moveTo(left, cy);
 	path.lineTo(right, cy);
@@ -451,15 +472,81 @@ function drawAxes(path: Path2D, x: number, y: number, w: number, h: number, stro
 	}
 }
 
-function drawArrow(path: Path2D, sx: number, sy: number, ex: number, ey: number): void {
+// A number line from start to end: the axis, an arrowhead at end and nine evenly spaced ticks.
+function drawNumberLine(path: Path2D, sx: number, sy: number, ex: number, ey: number, strokeWidth: number): void {
+	const len = Math.hypot(ex - sx, ey - sy);
+	if (len < 1e-9) return;
+	const dx = (ex - sx) / len,
+		dy = (ey - sy) / len;
+	const px = -dy,
+		py = dx;
+	const [head, tick] = markSizes(len, strokeWidth);
+	const bx = ex - dx * head,
+		by = ey - dy * head;
 	path.moveTo(sx, sy);
 	path.lineTo(ex, ey);
-	const ang = Math.atan2(ey - sy, ex - sx);
-	const head = Math.max(10, Math.hypot(ex - sx, ey - sy) * 0.12);
-	path.moveTo(ex, ey);
-	path.lineTo(ex - head * Math.cos(ang - Math.PI / 6), ey - head * Math.sin(ang - Math.PI / 6));
-	path.moveTo(ex, ey);
-	path.lineTo(ex - head * Math.cos(ang + Math.PI / 6), ey - head * Math.sin(ang + Math.PI / 6));
+	path.moveTo(bx + px * head * 0.5, by + py * head * 0.5);
+	path.lineTo(ex, ey);
+	path.lineTo(bx - px * head * 0.5, by - py * head * 0.5);
+	const n = 10;
+	for (let i = 1; i < n; i++) {
+		const ax = sx + dx * ((len * i) / n),
+			ay = sy + dy * ((len * i) / n);
+		path.moveTo(ax + px * tick, ay + py * tick);
+		path.lineTo(ax - px * tick, ay - py * tick);
+	}
+}
+
+// Open ">" chevron sized from the stroke width, its tip just past the shaft end.
+function drawArrowHead(path: Path2D, sx: number, sy: number, ex: number, ey: number, strokeWidth: number): void {
+	const len = Math.hypot(ex - sx, ey - sy);
+	if (len < 1e-9) return;
+	const dx = (ex - sx) / len,
+		dy = (ey - sy) / len;
+	const headLen = Math.max(12, strokeWidth * 3.5);
+	const tx = ex + dx * strokeWidth * 0.5,
+		ty = ey + dy * strokeWidth * 0.5;
+	const bx = tx - dx * headLen,
+		by = ty - dy * headLen;
+	const px = -dy * headLen * 0.5,
+		py = dx * headLen * 0.5;
+	path.moveTo(bx + px, by + py);
+	path.lineTo(tx, ty);
+	path.lineTo(bx - px, by - py);
+}
+
+const SPLINE_SAMPLES = 16;
+
+// Uniform Catmull-Rom through the control points: the stored ones, or both ends and their midpoint.
+function drawSpline(path: Path2D, item: ShapeItem): void {
+	const [sx, sy] = item.start;
+	const [ex, ey] = item.end;
+	const c: number[][] = item.points?.length
+		? item.points
+		: [
+				[sx, sy],
+				[(sx + ex) / 2, (sy + ey) / 2],
+				[ex, ey],
+			];
+	path.moveTo(c[0][0], c[0][1]);
+	if (c.length < 3) {
+		for (let i = 1; i < c.length; i++) path.lineTo(c[i][0], c[i][1]);
+		return;
+	}
+	for (let i = 0; i < c.length - 1; i++) {
+		const p0 = c[Math.max(i - 1, 0)],
+			p1 = c[i],
+			p2 = c[i + 1],
+			p3 = c[Math.min(i + 2, c.length - 1)];
+		for (let s = 1; s <= SPLINE_SAMPLES; s++) {
+			const t = s / SPLINE_SAMPLES,
+				t2 = t * t,
+				t3 = t2 * t;
+			const f = (a: number, b: number, cc: number, d: number) =>
+				0.5 * (2 * b + (-a + cc) * t + (2 * a - 5 * b + 4 * cc - d) * t2 + (-a + 3 * b - 3 * cc + d) * t3);
+			path.lineTo(f(p0[0], p1[0], p2[0], p3[0]), f(p0[1], p1[1], p2[1], p3[1]));
+		}
+	}
 }
 
 // ── text boxes ────────────────────────────────────────────────────────────
