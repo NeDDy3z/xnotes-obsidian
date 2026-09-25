@@ -36,6 +36,14 @@ function fontFamily(face?: string): string {
 	}
 }
 
+// The slice of pdf.js used to paint a note's source PDF under its pages.
+export interface PdfSource {
+	getPage(pageNumber: number): Promise<{
+		getViewport(params: { scale: number }): { width: number; height: number };
+		render(params: { canvasContext: CanvasRenderingContext2D; viewport: unknown }): { promise: Promise<void> };
+	}>;
+}
+
 // Render one page onto the canvas. `scale` is the backing-store multiplier
 // (device pixel ratio times a quality factor); page units map 1:1 to CSS px.
 export async function renderPage(
@@ -44,6 +52,7 @@ export async function renderPage(
 	style: PageStyle | undefined,
 	assetUrls: Map<string, string>,
 	scale: number,
+	pdf: PdfSource | null,
 ): Promise<void> {
 	const ctx = canvas.getContext("2d");
 	if (!ctx) throw new Error("2D canvas context unavailable");
@@ -53,7 +62,13 @@ export async function renderPage(
 	ctx.setTransform(scale, 0, 0, scale, 0, 0);
 	ctx.clearRect(0, 0, page.width, page.height);
 
-	drawBackground(ctx, page, page.style ?? style);
+	const pageStyle = page.style ?? style;
+	if (pdf && page.pdf_page != null) {
+		drawPaper(ctx, page, pageStyle);
+		await drawPdfPage(ctx, pdf, page);
+	} else {
+		drawBackground(ctx, page, pageStyle);
+	}
 
 	for (const item of page.items) {
 		switch (item.kind) {
@@ -76,10 +91,29 @@ export async function renderPage(
 	}
 }
 
-function drawBackground(ctx: CanvasRenderingContext2D, page: Page, style?: PageStyle): void {
-	const paper = style?.page_color ?? [255, 255, 255, 255];
-	ctx.fillStyle = rgbaCss(paper);
+function drawPaper(ctx: CanvasRenderingContext2D, page: Page, style?: PageStyle): void {
+	ctx.fillStyle = rgbaCss(style?.page_color ?? [255, 255, 255, 255]);
 	ctx.fillRect(0, 0, page.width, page.height);
+}
+
+// The PDF page covers the whole note page, so no ruling is drawn over it.
+async function drawPdfPage(ctx: CanvasRenderingContext2D, pdf: PdfSource, page: Page): Promise<void> {
+	const pdfPage = await pdf.getPage((page.pdf_page ?? 0) + 1);
+	const natural = pdfPage.getViewport({ scale: 1 });
+	const viewport = pdfPage.getViewport({ scale: ctx.canvas.width / natural.width });
+	// Detached offscreen buffer: createEl would append it to the document, so use createElement.
+	// eslint-disable-next-line obsidianmd/prefer-create-el
+	const raster = ctx.canvas.ownerDocument.createElement("canvas");
+	raster.width = Math.max(1, Math.round(viewport.width));
+	raster.height = Math.max(1, Math.round(viewport.height));
+	const rctx = raster.getContext("2d");
+	if (!rctx) return;
+	await pdfPage.render({ canvasContext: rctx, viewport }).promise;
+	ctx.drawImage(raster, 0, 0, page.width, page.height);
+}
+
+function drawBackground(ctx: CanvasRenderingContext2D, page: Page, style?: PageStyle): void {
+	drawPaper(ctx, page, style);
 
 	const pattern = style?.pattern ?? "none";
 	if (pattern === "none" || pattern === "blank") return;

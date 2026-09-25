@@ -1,6 +1,6 @@
-import { FileView, Notice, WorkspaceLeaf, type TFile } from "obsidian";
+import { FileView, loadPdfJs, Notice, WorkspaceLeaf, type TFile } from "obsidian";
 import { parseXNote } from "./parser.ts";
-import { renderPage } from "./renderer.ts";
+import { renderPage, type PdfSource } from "./renderer.ts";
 import type { XNoteDocument } from "./types.ts";
 import type XNotesPlugin from "./main.ts";
 
@@ -9,11 +9,21 @@ export const VIEW_TYPE_XNOTE = "xnote-view";
 const MIN_ZOOM = 0.1;
 const MAX_ZOOM = 5;
 const ZOOM_STEP = 1.25;
+const SOURCE_PDF = "assets/source.pdf";
+
+interface PdfDocument extends PdfSource {
+	destroy(): Promise<void>;
+}
+
+interface PdfJs {
+	getDocument(params: { data: Uint8Array }): { promise: Promise<PdfDocument> };
+}
 
 export class XNoteView extends FileView {
 	private readonly plugin: XNotesPlugin;
 	private doc: XNoteDocument | null = null;
 	private assetUrls = new Map<string, string>();
+	private pdf: PdfDocument | null = null;
 	private pagesEl!: HTMLElement;
 	private zoomLabel!: HTMLElement;
 	private zoom = 1;
@@ -148,6 +158,16 @@ export class XNoteView extends FileView {
 			this.assetUrls.set(name, URL.createObjectURL(blob));
 		}
 
+		const pdfBlob = this.doc.assets.get(SOURCE_PDF);
+		if (this.doc.manifest.has_pdf && pdfBlob) {
+			try {
+				const pdfjs = (await loadPdfJs()) as PdfJs;
+				this.pdf = await pdfjs.getDocument({ data: new Uint8Array(await pdfBlob.arrayBuffer()) }).promise;
+			} catch (e) {
+				new Notice(`xNote: could not load the source PDF: ${(e as Error).message}`);
+			}
+		}
+
 		await this.renderAll();
 	}
 
@@ -176,7 +196,7 @@ export class XNoteView extends FileView {
 			canvas.dataset.baseWidth = String(page.width);
 			canvas.dataset.baseHeight = String(page.height);
 			try {
-				await renderPage(canvas, page, manifest.style, this.assetUrls, scale);
+				await renderPage(canvas, page, manifest.style, this.assetUrls, scale, this.pdf);
 			} catch (e) {
 				wrap.setText(`Failed to render page ${i + 1}: ${(e as Error).message}`);
 			}
@@ -221,5 +241,7 @@ export class XNoteView extends FileView {
 	private revokeAssets(): void {
 		for (const url of this.assetUrls.values()) URL.revokeObjectURL(url);
 		this.assetUrls.clear();
+		void this.pdf?.destroy();
+		this.pdf = null;
 	}
 }
