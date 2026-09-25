@@ -30,11 +30,16 @@
 	padding: 16px;
 	display: flex;
 	flex-direction: column;
-	align-items: center;
+	align-items: flex-start;
 	gap: 16px;
 	height: calc(100% - 37px);
 	/* Let one finger pan but reserve two-finger pinch for our zoom handler. */
 	touch-action: pan-x pan-y;
+}
+
+/* Auto margins centre a page that fits but, unlike align-items: center, never push a wider one past the scroll start. */
+.xnote-page {
+	margin: 0 auto;
 }
 
 .xnote-page canvas {

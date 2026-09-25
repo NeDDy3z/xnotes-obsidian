@@ -40,7 +40,9 @@ function fontFamily(face?: string): string {
 export interface PdfSource {
 	getPage(pageNumber: number): Promise<{
 		getViewport(params: { scale: number }): { width: number; height: number };
-		render(params: { canvasContext: CanvasRenderingContext2D; viewport: unknown }): { promise: Promise<void> };
+		render(params: { canvasContext: OffscreenCanvasRenderingContext2D; viewport: unknown }): {
+			promise: Promise<void>;
+		};
 	}>;
 }
 
@@ -101,11 +103,7 @@ async function drawPdfPage(ctx: CanvasRenderingContext2D, pdf: PdfSource, page: 
 	const pdfPage = await pdf.getPage((page.pdf_page ?? 0) + 1);
 	const natural = pdfPage.getViewport({ scale: 1 });
 	const viewport = pdfPage.getViewport({ scale: ctx.canvas.width / natural.width });
-	// Detached offscreen buffer: createEl would append it to the document, so use createElement.
-	// eslint-disable-next-line obsidianmd/prefer-create-el
-	const raster = ctx.canvas.ownerDocument.createElement("canvas");
-	raster.width = Math.max(1, Math.round(viewport.width));
-	raster.height = Math.max(1, Math.round(viewport.height));
+	const raster = new OffscreenCanvas(Math.max(1, Math.round(viewport.width)), Math.max(1, Math.round(viewport.height)));
 	const rctx = raster.getContext("2d");
 	if (!rctx) return;
 	await pdfPage.render({ canvasContext: rctx, viewport }).promise;
@@ -163,7 +161,7 @@ function drawBackground(ctx: CanvasRenderingContext2D, page: Page, style?: PageS
 // point, plus the quad bridging each consecutive pair. Each convex piece is
 // filled SEPARATELY (not merged into one path) so overlaps never cancel under the
 // winding rule, which gives round caps and joins for free with no holes.
-function fillDiskRibbon(ctx: CanvasRenderingContext2D, geom: StrokeGeometry, fill: string): void {
+function fillDiskRibbon(ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D, geom: StrokeGeometry, fill: string): void {
 	const c = geom.centerline;
 	const hwv = geom.halfWidths;
 	const n = hwv.length;
@@ -220,11 +218,7 @@ function compositeLayer(
 	blur: number,
 ): void {
 	if (alpha <= 0) return;
-	// Detached offscreen buffer: createEl would append it to the document, so use createElement.
-	// eslint-disable-next-line obsidianmd/prefer-create-el
-	const layer = ctx.canvas.ownerDocument.createElement("canvas");
-	layer.width = ctx.canvas.width;
-	layer.height = ctx.canvas.height;
+	const layer = new OffscreenCanvas(ctx.canvas.width, ctx.canvas.height);
 	const lctx = layer.getContext("2d");
 	if (!lctx) return;
 	lctx.setTransform(ctx.getTransform());
