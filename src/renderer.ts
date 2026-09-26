@@ -64,7 +64,7 @@ export async function renderPage(
 	ctx.setTransform(scale, 0, 0, scale, 0, 0);
 	ctx.clearRect(0, 0, page.width, page.height);
 
-	const pageStyle = page.style ?? style;
+	const pageStyle = { ...style, ...page.style };
 	if (pdf && page.pdf_page != null) {
 		drawPaper(ctx, page, pageStyle);
 		await drawPdfPage(ctx, pdf, page);

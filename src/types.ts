@@ -91,13 +91,13 @@ export interface Page {
 	height: number;
 	pdf_page: number | null;
 	items: Item[];
-	style?: PageStyle; // per-page override of the document style
+	style?: PageStyle; // per-field override; missing fields inherit from the document style
 }
 
 export interface PageStyle {
-	page_color: Rgba;
-	pattern: string; // "grid", "lines", "dots", "none", ...
-	spacing: number;
+	page_color?: Rgba;
+	pattern?: string; // "grid", "lines", "dots", "none", ...
+	spacing?: number;
 	pattern_color?: Rgba; // defaults to grey 25% (150,150,150,64)
 }
 

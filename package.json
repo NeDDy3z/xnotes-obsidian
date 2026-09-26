@@ -1,6 +1,6 @@
 {
   "name": "xnotes-obsidian",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "Read and view .xnote handwritten notes (from the xnotes Android app) inside Obsidian.",
   "main": "main.js",
   "type": "module",
