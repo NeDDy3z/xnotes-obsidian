@@ -1,4 +1,8 @@
+import type { TextFlow } from "./flow.ts";
+import { paintFlowPage, type PageFlow } from "./flowLayout.ts";
+import type { MathPlacement, MathSetter } from "./math.ts";
 import { buildStrokeGeometry, type StrokeGeometry } from "./strokeEngine.ts";
+import { fontFamily, PT_TO_PX, rgbaCss } from "./text.ts";
 import type {
 	ImageItem,
 	Page,
@@ -10,30 +14,8 @@ import type {
 	TextItem,
 } from "./types.ts";
 
-const PT_TO_PX = 150 / 72; // xnotes authors text at a fixed 150 DPI
-
-function rgbaCss(c: Rgba | null | undefined, fallback = "#000"): string {
-	if (!c) return fallback;
-	const a = (c[3] ?? 255) / 255;
-	return `rgba(${c[0] | 0}, ${c[1] | 0}, ${c[2] | 0}, ${a})`;
-}
-
 function cssOpaque(c: Rgba): string {
 	return `rgb(${c[0] | 0}, ${c[1] | 0}, ${c[2] | 0})`;
-}
-
-function fontFamily(face?: string): string {
-	switch (face) {
-		case "sans":
-			return "ui-sans-serif, system-ui, sans-serif";
-		case "serif":
-			return "ui-serif, Georgia, serif";
-		case "hand":
-			return "'Segoe Script', 'Comic Sans MS', cursive";
-		case "mono":
-		default:
-			return "ui-monospace, monospace";
-	}
 }
 
 // The slice of pdf.js used to paint a note's source PDF under its pages.
@@ -46,8 +28,15 @@ export interface PdfSource {
 	}>;
 }
 
+// The flowing text laid out for this page.
+export interface PageText {
+	flow: TextFlow;
+	page: PageFlow;
+}
+
 // Render one page onto the canvas. `scale` is the backing-store multiplier
 // (device pixel ratio times a quality factor); page units map 1:1 to CSS px.
+// Formulas are returned rather than drawn, for the caller to mount over the canvas.
 export async function renderPage(
 	canvas: HTMLCanvasElement,
 	page: Page,
@@ -55,7 +44,9 @@ export async function renderPage(
 	assetUrls: Map<string, string>,
 	scale: number,
 	pdf: PdfSource | null,
-): Promise<void> {
+	text: PageText | null,
+	math: MathSetter,
+): Promise<MathPlacement[]> {
 	const ctx = canvas.getContext("2d");
 	if (!ctx) throw new Error("2D canvas context unavailable");
 
@@ -72,6 +63,9 @@ export async function renderPage(
 		drawBackground(ctx, page, pageStyle);
 	}
 
+	const formulas: MathPlacement[] = [];
+	if (text) paintFlowPage(ctx, text.page, text.flow, pageStyle.page_color ?? [255, 255, 255, 255], formulas);
+
 	for (const item of page.items) {
 		switch (item.kind) {
 			case "stroke":
@@ -84,13 +78,14 @@ export async function renderPage(
 				drawTable(ctx, item);
 				break;
 			case "text":
-				drawText(ctx, item);
+				drawText(ctx, item, math, formulas);
 				break;
 			case "image":
 				await drawImage(ctx, item, assetUrls);
 				break;
 		}
 	}
+	return formulas;
 }
 
 function drawPaper(ctx: CanvasRenderingContext2D, page: Page, style?: PageStyle): void {
@@ -415,9 +410,10 @@ function drawShape(ctx: CanvasRenderingContext2D, item: ShapeItem): void {
 		case "polygon":
 		case "polyline":
 		case "curve":
-			if (item.points && item.points.length) {
-				path.moveTo(item.points[0][0], item.points[0][1]);
-				for (let i = 1; i < item.points.length; i++) path.lineTo(item.points[i][0], item.points[i][1]);
+		case "function":
+			for (const run of pointRuns(item.points ?? [])) {
+				path.moveTo(run[0][0], run[0][1]);
+				for (let i = 1; i < run.length; i++) path.lineTo(run[i][0], run[i][1]);
 				if (item.shape === "polygon") path.closePath();
 			}
 			break;
@@ -543,6 +539,23 @@ function drawArrowHead(path: Path2D, sx: number, sy: number, ex: number, ey: num
 	path.lineTo(bx - px, by - py);
 }
 
+// Split a vertex list at its break markers (empty points, written at a plotted function's poles)
+// into runs of two or more points.
+function pointRuns(points: number[][]): number[][][] {
+	const runs: number[][][] = [];
+	let run: number[][] = [];
+	for (const p of points) {
+		if (p.length >= 2) {
+			run.push(p);
+			continue;
+		}
+		if (run.length >= 2) runs.push(run);
+		run = [];
+	}
+	if (run.length >= 2) runs.push(run);
+	return runs;
+}
+
 const SPLINE_SAMPLES = 16;
 
 // Uniform Catmull-Rom through the control points: the stored ones, or both ends and their midpoint.
@@ -579,8 +592,14 @@ function drawSpline(path: Path2D, item: ShapeItem): void {
 
 // ── text boxes ────────────────────────────────────────────────────────────
 
-function drawText(ctx: CanvasRenderingContext2D, item: TextItem): void {
+function drawText(ctx: CanvasRenderingContext2D, item: TextItem, math: MathSetter, formulas: MathPlacement[]): void {
 	const px = item.point_size * PT_TO_PX;
+	// A formula box sets its LaTeX with its top at pos; one that will not set shows as text.
+	const box = item.math && item.text ? math.measure(item.text, px, true) : null;
+	if (box) {
+		formulas.push({ latex: item.text, display: true, x: item.pos[0], baseline: item.pos[1] + box.ascent, sizePx: px, color: item.rgba });
+		return;
+	}
 	ctx.save();
 	ctx.fillStyle = rgbaCss(item.rgba);
 	const weight = item.bold ? "700" : "400";

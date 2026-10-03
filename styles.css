@@ -40,6 +40,38 @@
 /* Auto margins centre a page that fits but, unlike align-items: center, never push a wider one past the scroll start. */
 .xnote-page {
 	margin: 0 auto;
+	position: relative;
+}
+
+/* Formulas sit over the page canvas in page px, scaled with the zoom. */
+.xnote-math-layer {
+	position: absolute;
+	top: 0;
+	left: 0;
+	transform-origin: 0 0;
+	pointer-events: none;
+}
+
+/* The strut marks the text baseline the formula is placed against. */
+.xnote-math {
+	position: absolute;
+	white-space: nowrap;
+	font-family: serif;
+	line-height: normal;
+}
+
+.xnote-math-strut {
+	display: inline-block;
+	width: 0;
+	height: 0;
+}
+
+.xnote-math-measure {
+	position: absolute;
+	top: 0;
+	left: -10000px;
+	visibility: hidden;
+	pointer-events: none;
 }
 
 .xnote-page canvas {

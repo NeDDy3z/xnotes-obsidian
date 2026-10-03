@@ -1,6 +1,10 @@
-import { FileView, loadPdfJs, Notice, WorkspaceLeaf, type TFile } from "obsidian";
+import { finishRenderMath, FileView, loadPdfJs, Notice, WorkspaceLeaf, type TFile } from "obsidian";
+import { flowMath, isEmptyFlow } from "./flow.ts";
+import { layoutFlow, type PageFlow } from "./flowLayout.ts";
+import { MathSetter } from "./math.ts";
 import { parseXNote } from "./parser.ts";
 import { renderPage, type PdfSource } from "./renderer.ts";
+import { TextMeasurer } from "./text.ts";
 import type { XNoteDocument } from "./types.ts";
 import type XNotesPlugin from "./main.ts";
 
@@ -10,6 +14,7 @@ const MIN_ZOOM = 0.1;
 const MAX_ZOOM = 5;
 const ZOOM_STEP = 1.25;
 const SOURCE_PDF = "assets/source.pdf";
+const DEFAULT_DPI = 150;
 
 interface PdfDocument extends PdfSource {
 	destroy(): Promise<void>;
@@ -24,6 +29,8 @@ export class XNoteView extends FileView {
 	private doc: XNoteDocument | null = null;
 	private assetUrls = new Map<string, string>();
 	private pdf: PdfDocument | null = null;
+	private readonly math = new MathSetter();
+	private flowPages: PageFlow[] | null = null;
 	private pagesEl!: HTMLElement;
 	private zoomLabel!: HTMLElement;
 	private zoom = 1;
@@ -168,7 +175,31 @@ export class XNoteView extends FileView {
 			}
 		}
 
+		await this.layoutText();
 		await this.renderAll();
+	}
+
+	// Typeset every formula, then lay the flowing text across the pages against those sizes.
+	private async layoutText(): Promise<void> {
+		this.flowPages = null;
+		if (!this.doc) return;
+		const { manifest, flow } = this.doc;
+		const formulas = flow ? flowMath(flow) : [];
+		for (const page of manifest.pages) {
+			for (const item of page.items) {
+				if (item.kind === "text" && item.math && item.text) formulas.push({ latex: item.text, display: true });
+			}
+		}
+		if (formulas.length > 0) {
+			try {
+				await this.math.prepare(formulas, this.contentEl.doc);
+			} catch (e) {
+				new Notice(`xNote: could not typeset maths: ${(e as Error).message}`);
+			}
+		}
+		if (flow && !isEmptyFlow(flow)) {
+			this.flowPages = layoutFlow(flow, manifest.pages, manifest.dpi ?? DEFAULT_DPI, new TextMeasurer(), this.math);
+		}
 	}
 
 	async onUnloadFile(): Promise<void> {
@@ -195,12 +226,18 @@ export class XNoteView extends FileView {
 			const canvas = wrap.createEl("canvas");
 			canvas.dataset.baseWidth = String(page.width);
 			canvas.dataset.baseHeight = String(page.height);
+			const layer = wrap.createDiv({ cls: "xnote-math-layer" });
+			layer.setCssStyles({ width: `${page.width}px`, height: `${page.height}px` });
+			const flowPage = this.flowPages?.[i];
+			const text = this.doc.flow && flowPage ? { flow: this.doc.flow, page: flowPage } : null;
 			try {
-				await renderPage(canvas, page, manifest.style, this.assetUrls, scale, this.pdf);
+				const formulas = await renderPage(canvas, page, manifest.style, this.assetUrls, scale, this.pdf, text, this.math);
+				for (const f of formulas) this.math.mount(layer, f);
 			} catch (e) {
 				wrap.setText(`Failed to render page ${i + 1}: ${(e as Error).message}`);
 			}
 		}
+		await finishRenderMath();
 		this.applyZoom();
 	}
 
@@ -228,6 +265,9 @@ export class XNoteView extends FileView {
 		this.pagesEl.querySelectorAll("canvas").forEach((canvas) => {
 			const base = Number(canvas.dataset.baseWidth) || canvas.width;
 			canvas.setCssStyles({ width: `${base * this.zoom}px`, height: "auto" });
+		});
+		this.pagesEl.querySelectorAll<HTMLElement>(".xnote-math-layer").forEach((layer) => {
+			layer.setCssStyles({ transform: `scale(${this.zoom})` });
 		});
 		this.zoomLabel.setText(`${Math.round(this.zoom * 100)}%`);
 	}

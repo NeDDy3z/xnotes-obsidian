@@ -1,3 +1,5 @@
+import type { TextFlow } from "./flow.ts";
+
 // Types mirroring the xnote manifest.json schema (format "xnote", version 1).
 
 export type Rgba = [number, number, number, number];
@@ -32,13 +34,13 @@ export interface StrokeItem {
 
 export interface ShapeItem {
 	kind: "shape";
-	shape: string; // "line", "arrow", "rectangle", "ellipse", "triangle", "polygon", "axes", "numberline", "spline", ...
+	shape: string; // "line", "arrow", "rectangle", "ellipse", "triangle", "polygon", "axes", "numberline", "spline", "function", ...
 	start: Point;
 	end: Point;
 	stroke_rgba: Rgba | null;
 	stroke_width: number;
 	fill_rgba: Rgba | null;
-	points?: number[][]; // absolute px vertices for polygon / polyline / curve, control points for spline
+	points?: number[][]; // absolute px vertices for polygon / polyline / curve / function (an empty point breaks the run), control points for spline
 	neon?: boolean;
 	neon_strength?: number;
 	dashed?: boolean;
@@ -82,6 +84,7 @@ export interface TextItem {
 	underline?: boolean;
 	strike?: boolean;
 	align?: TextAlign;
+	math?: boolean; // text is LaTeX, drawn as a formula
 }
 
 export type Item = StrokeItem | ShapeItem | ImageItem | TableItem | TextItem;
@@ -113,8 +116,9 @@ export interface Manifest {
 	pages: Page[];
 }
 
-// Parsed document: manifest plus decoded image assets keyed by their in-zip path.
+// Parsed document: manifest, decoded image assets keyed by their in-zip path, and the flowing text.
 export interface XNoteDocument {
 	manifest: Manifest;
 	assets: Map<string, Blob>;
+	flow: TextFlow | null;
 }

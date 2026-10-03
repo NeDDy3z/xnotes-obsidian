@@ -1,4 +1,5 @@
 import { unzipSync } from "fflate";
+import { parseFlowXml } from "./flow.ts";
 import type { Manifest, XNoteDocument } from "./types.ts";
 
 const IMAGE_MIME: Record<string, string> = {
@@ -14,7 +15,7 @@ function mimeFor(path: string): string {
 	return IMAGE_MIME[ext] ?? "application/octet-stream";
 }
 
-// Parse a raw .xnote (ZIP) file into its manifest and decoded image assets.
+// Parse a raw .xnote (ZIP) file into its manifest, decoded image assets and flowing text.
 export function parseXNote(data: ArrayBuffer): XNoteDocument {
 	const files = unzipSync(new Uint8Array(data));
 
@@ -34,12 +35,15 @@ export function parseXNote(data: ArrayBuffer): XNoteDocument {
 		throw new Error("Not a valid .xnote file: manifest has no pages array.");
 	}
 
+	const flowBytes = files["flow.xml"];
+	const flow = flowBytes ? parseFlowXml(new TextDecoder().decode(flowBytes)) : null;
+
 	const assets = new Map<string, Blob>();
 	for (const [name, bytes] of Object.entries(files)) {
-		if (name === "manifest.json" || name.endsWith("/")) continue;
+		if (name === "manifest.json" || name === "flow.xml" || name.endsWith("/")) continue;
 		// Copy into a fresh buffer so the Blob owns its bytes independently.
 		assets.set(name, new Blob([bytes.slice()], { type: mimeFor(name) }));
 	}
 
-	return { manifest, assets };
+	return { manifest, assets, flow };
 }
