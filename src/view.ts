@@ -1,11 +1,12 @@
 import { finishRenderMath, FileView, loadPdfJs, Notice, WorkspaceLeaf, type TFile } from "obsidian";
 import { flowMath, isEmptyFlow } from "./flow.ts";
 import { layoutFlow, type PageFlow } from "./flowLayout.ts";
-import { MathSetter } from "./math.ts";
+import { MathSetter, rasterizeMathLayer } from "./math.ts";
 import { parseXNote } from "./parser.ts";
+import { buildPdf, PDF_PRODUCER, rgbaToRgb, type PdfPage } from "./pdf.ts";
 import { renderPage, type PdfSource } from "./renderer.ts";
 import { TextMeasurer } from "./text.ts";
-import type { XNoteDocument } from "./types.ts";
+import type { Page, XNoteDocument } from "./types.ts";
 import type XNotesPlugin from "./main.ts";
 
 export const VIEW_TYPE_XNOTE = "xnote-view";
@@ -15,6 +16,12 @@ const MAX_ZOOM = 5;
 const ZOOM_STEP = 1.25;
 const SOURCE_PDF = "assets/source.pdf";
 const DEFAULT_DPI = 150;
+// Backing-store limits every platform honours (iOS caps a canvas at 16.7M pixels); a large
+// .xcanvas renders at a lower resolution rather than blank.
+const MAX_CANVAS_SIDE = 16384;
+const MAX_CANVAS_AREA = 16_777_216;
+// Resolution of an exported PDF page.
+const EXPORT_DPI = 300;
 
 interface PdfDocument extends PdfSource {
 	destroy(): Promise<void>;
@@ -35,6 +42,11 @@ export class XNoteView extends FileView {
 	private zoomLabel!: HTMLElement;
 	private zoom = 1;
 	private fit = true;
+	// Bumped on every load and unload, so a render still running for an older file stops.
+	private loadToken = 0;
+	// Settles once the current file is drawn.
+	private rendered: Promise<void> = Promise.resolve();
+	private exporting = false;
 
 	constructor(leaf: WorkspaceLeaf, plugin: XNotesPlugin) {
 		super(leaf);
@@ -71,6 +83,7 @@ export class XNoteView extends FileView {
 		mkBtn("-", "Zoom out", () => this.setZoom(this.zoom / ZOOM_STEP));
 		this.zoomLabel = bar.createSpan({ cls: "xnote-zoom-label", text: "100%" });
 		mkBtn("+", "Zoom in", () => this.setZoom(this.zoom * ZOOM_STEP));
+		mkBtn("PDF", "Export as PDF next to this file", () => void this.exportPdf());
 
 		this.pagesEl = this.contentEl.createDiv({ cls: "xnote-pages" });
 
@@ -142,9 +155,11 @@ export class XNoteView extends FileView {
 	}
 
 	async onLoadFile(file: TFile): Promise<void> {
+		const token = ++this.loadToken;
 		this.revokeAssets();
 		this.pagesEl.empty();
 		this.doc = null;
+		this.flowPages = null;
 
 		let data: ArrayBuffer;
 		try {
@@ -153,6 +168,7 @@ export class XNoteView extends FileView {
 			this.showError(`Could not read file: ${(e as Error).message}`);
 			return;
 		}
+		if (token !== this.loadToken) return;
 
 		try {
 			this.doc = parseXNote(data);
@@ -165,18 +181,32 @@ export class XNoteView extends FileView {
 			this.assetUrls.set(name, URL.createObjectURL(blob));
 		}
 
-		const pdfBlob = this.doc.assets.get(SOURCE_PDF);
-		if (this.doc.manifest.has_pdf && pdfBlob) {
+		// Drawn without holding up the load: the leaf ignores every file opened while a load is pending.
+		this.pagesEl.createDiv({ cls: "xnote-loading", text: "Loading…" });
+		this.rendered = this.renderDocument(token).catch((e: unknown) => {
+			if (token === this.loadToken) this.showError((e as Error).message);
+		});
+	}
+
+	private async renderDocument(token: number): Promise<void> {
+		const pdfBlob = this.doc?.assets.get(SOURCE_PDF);
+		if (this.doc?.manifest.has_pdf && pdfBlob) {
 			try {
 				const pdfjs = (await loadPdfJs()) as PdfJs;
-				this.pdf = await pdfjs.getDocument({ data: new Uint8Array(await pdfBlob.arrayBuffer()) }).promise;
+				const pdf = await pdfjs.getDocument({ data: new Uint8Array(await pdfBlob.arrayBuffer()) }).promise;
+				if (token !== this.loadToken) {
+					void pdf.destroy();
+					return;
+				}
+				this.pdf = pdf;
 			} catch (e) {
 				new Notice(`xNote: could not load the source PDF: ${(e as Error).message}`);
 			}
 		}
 
 		await this.layoutText();
-		await this.renderAll();
+		if (token !== this.loadToken) return;
+		await this.renderAll(token);
 	}
 
 	// Typeset every formula, then lay the flowing text across the pages against those sizes.
@@ -203,6 +233,7 @@ export class XNoteView extends FileView {
 	}
 
 	async onUnloadFile(): Promise<void> {
+		this.loadToken++;
 		this.revokeAssets();
 		this.pagesEl.empty();
 		this.doc = null;
@@ -212,15 +243,17 @@ export class XNoteView extends FileView {
 		this.revokeAssets();
 	}
 
-	private async renderAll(): Promise<void> {
+	private async renderAll(token: number): Promise<void> {
 		if (!this.doc) return;
 		this.pagesEl.empty();
 		const { manifest } = this.doc;
 
 		this.fit = true;
 		const scale = this.effectiveScale();
+		let mounted = 0;
 
 		for (let i = 0; i < manifest.pages.length; i++) {
+			if (token !== this.loadToken) return;
 			const page = manifest.pages[i];
 			const wrap = this.pagesEl.createDiv({ cls: "xnote-page" });
 			const canvas = wrap.createEl("canvas");
@@ -228,17 +261,123 @@ export class XNoteView extends FileView {
 			canvas.dataset.baseHeight = String(page.height);
 			const layer = wrap.createDiv({ cls: "xnote-math-layer" });
 			layer.setCssStyles({ width: `${page.width}px`, height: `${page.height}px` });
-			const flowPage = this.flowPages?.[i];
-			const text = this.doc.flow && flowPage ? { flow: this.doc.flow, page: flowPage } : null;
 			try {
-				const formulas = await renderPage(canvas, page, manifest.style, this.assetUrls, scale, this.pdf, text, this.math);
+				const formulas = await renderPage(
+					canvas,
+					page,
+					manifest.style,
+					this.assetUrls,
+					capScale(page, scale),
+					this.pdf,
+					this.pageText(i),
+					this.math,
+				);
+				if (token !== this.loadToken) return;
 				for (const f of formulas) this.math.mount(layer, f);
+				mounted += formulas.length;
 			} catch (e) {
 				wrap.setText(`Failed to render page ${i + 1}: ${(e as Error).message}`);
 			}
 		}
-		await finishRenderMath();
+		// Only with MathJax loaded: without it Obsidian's finishRenderMath throws in a timer and
+		// its promise never settles, for this call and every later one.
+		if (mounted > 0 && this.math.ready()) await finishRenderMath();
+		if (token !== this.loadToken) return;
 		this.applyZoom();
+	}
+
+	private pageText(i: number) {
+		const flowPage = this.flowPages?.[i];
+		return this.doc?.flow && flowPage ? { flow: this.doc.flow, page: flowPage } : null;
+	}
+
+	// Write every page as a PDF beside the note, e.g. Lecture.xnote -> Lecture.pdf. A PDF of that
+	// name that this plugin did not export is never overwritten; the next free name is taken instead.
+	private async exportPdf(): Promise<void> {
+		const file = this.file;
+		if (!file || this.exporting) return;
+		this.exporting = true;
+		const token = this.loadToken;
+		const progress = new Notice("xNote: exporting PDF…", 0);
+		try {
+			await this.rendered;
+			if (token !== this.loadToken || !this.doc) return;
+			const { manifest } = this.doc;
+			const dpi = manifest.dpi ?? DEFAULT_DPI;
+			const wraps = this.pagesEl.querySelectorAll(".xnote-page");
+			const pages: PdfPage[] = [];
+			let mathDropped = false;
+			for (let i = 0; i < manifest.pages.length; i++) {
+				const page = manifest.pages[i];
+				let rgba: Uint8ClampedArray;
+				let canvas = await this.exportCanvas(i, dpi, wraps[i]?.querySelector<HTMLElement>(".xnote-math-layer") ?? null);
+				try {
+					rgba = canvasPixels(canvas);
+				} catch {
+					// Drawing the formulas tainted the canvas on this platform: export the page without them.
+					mathDropped = true;
+					canvas = await this.exportCanvas(i, dpi, null);
+					rgba = canvasPixels(canvas);
+				}
+				if (token !== this.loadToken) return;
+				pages.push({
+					width: (page.width * 72) / dpi,
+					height: (page.height * 72) / dpi,
+					pixelsWide: canvas.width,
+					pixelsHigh: canvas.height,
+					rgb: rgbaToRgb(rgba),
+				});
+			}
+			const bytes = buildPdf(pages);
+			const path = await this.writePdf(file, bytes);
+			new Notice(`xNote: exported ${path}${mathDropped ? " (formulas could not be included)" : ""}`);
+		} catch (e) {
+			new Notice(`xNote: PDF export failed: ${(e as Error).message}`);
+		} finally {
+			progress.hide();
+			this.exporting = false;
+		}
+	}
+
+	// One page drawn at export resolution, with the formulas mounted on screen laid over it.
+	private async exportCanvas(i: number, dpi: number, layer: HTMLElement | null): Promise<HTMLCanvasElement> {
+		if (!this.doc) throw new Error("No document loaded.");
+		const page = this.doc.manifest.pages[i];
+		const canvas = createEl("canvas");
+		await renderPage(
+			canvas,
+			page,
+			this.doc.manifest.style,
+			this.assetUrls,
+			capScale(page, EXPORT_DPI / dpi),
+			this.pdf,
+			this.pageText(i),
+			this.math,
+		);
+		const math = layer ? await rasterizeMathLayer(layer, page.width, page.height) : null;
+		const ctx = canvas.getContext("2d");
+		if (math && ctx) {
+			ctx.setTransform(1, 0, 0, 1, 0, 0);
+			ctx.drawImage(math, 0, 0, canvas.width, canvas.height);
+		}
+		return canvas;
+	}
+
+	private async writePdf(file: TFile, bytes: Uint8Array): Promise<string> {
+		const stem = file.path.slice(0, file.path.length - file.extension.length - 1);
+		const data = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+		for (let n = 0; ; n++) {
+			const path = n === 0 ? `${stem}.pdf` : `${stem} ${n}.pdf`;
+			const existing = this.app.vault.getFileByPath(path);
+			if (!existing) {
+				await this.app.vault.createBinary(path, data);
+				return path;
+			}
+			if (isOwnExport(await this.app.vault.readBinary(existing))) {
+				await this.app.vault.modifyBinary(existing, data);
+				return path;
+			}
+		}
 	}
 
 	private effectiveScale(): number {
@@ -284,4 +423,25 @@ export class XNoteView extends FileView {
 		void this.pdf?.destroy();
 		this.pdf = null;
 	}
+}
+
+// Shrink `scale` until the page's backing store fits every platform's canvas limits.
+function capScale(page: Page, scale: number): number {
+	return Math.min(
+		scale,
+		MAX_CANVAS_SIDE / Math.max(page.width, page.height),
+		Math.sqrt(MAX_CANVAS_AREA / (page.width * page.height)),
+	);
+}
+
+function canvasPixels(canvas: HTMLCanvasElement): Uint8ClampedArray {
+	const ctx = canvas.getContext("2d");
+	if (!ctx) throw new Error("2D canvas context unavailable");
+	return ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+}
+
+// Whether a PDF was written by this plugin's export, which names itself in the Info dictionary.
+function isOwnExport(data: ArrayBuffer): boolean {
+	const head = new Uint8Array(data, 0, Math.min(data.byteLength, 1024));
+	return new TextDecoder("latin1").decode(head).includes(`/Producer (${PDF_PRODUCER})`);
 }

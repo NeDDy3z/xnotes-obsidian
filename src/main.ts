@@ -20,7 +20,7 @@ export default class XNotesPlugin extends Plugin {
 		this.registerView(VIEW_TYPE_XNOTE, (leaf) => new XNoteView(leaf, this));
 
 		// Register each extension separately so a clash on one does not drop the other.
-		for (const ext of ["xnote", "xnotes"]) {
+		for (const ext of ["xnote", "xnotes", "xcanvas"]) {
 			try {
 				this.registerExtensions([ext], VIEW_TYPE_XNOTE);
 			} catch {
