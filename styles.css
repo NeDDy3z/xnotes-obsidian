@@ -80,6 +80,13 @@
 	border-radius: 2px;
 }
 
+.xnote-loading {
+	color: var(--text-muted);
+	padding: 24px;
+	text-align: center;
+	width: 100%;
+}
+
 .xnote-error {
 	color: var(--text-error);
 	padding: 24px;

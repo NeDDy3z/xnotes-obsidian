@@ -120,3 +120,84 @@ export class MathSetter {
 		});
 	}
 }
+
+// Mirrors styles.css, which an SVG image cannot see.
+const LAYER_CSS =
+	".xnote-math{position:absolute;white-space:nowrap;font-family:serif;line-height:normal}" +
+	".xnote-math-strut{display:inline-block;width:0;height:0}";
+
+// A page's mounted formulas as one image, for drawing into an exported page. The layer is
+// serialized into an SVG foreignObject with MathJax's rules and fonts inlined, since an SVG
+// image loads nothing of its own. Null when the layer is empty or the image will not load.
+export async function rasterizeMathLayer(layer: HTMLElement, width: number, height: number): Promise<HTMLImageElement | null> {
+	if (!layer.hasChildNodes()) return null;
+	const clone = layer.cloneNode(true) as HTMLElement;
+	clone.setCssStyles({ position: "absolute", top: "0", left: "0", transform: "none" });
+	const css = LAYER_CSS + (await mathCss(layer.doc));
+	const svg =
+		`<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}">` +
+		`<foreignObject x="0" y="0" width="${width}" height="${height}">` +
+		`<div xmlns="http://www.w3.org/1999/xhtml" style="position:relative;width:${width}px;height:${height}px">` +
+		`<style><![CDATA[${css}]]></style>${new XMLSerializer().serializeToString(clone)}</div>` +
+		`</foreignObject></svg>`;
+	const img = new Image();
+	try {
+		await new Promise<void>((resolve, reject) => {
+			img.onload = () => resolve();
+			img.onerror = () => reject(new Error("formula image did not load"));
+			img.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+		});
+	} catch {
+		return null;
+	}
+	return img;
+}
+
+// Every MathJax rule in the document, with the fonts they reference inlined as data URLs.
+async function mathCss(doc: Document): Promise<string> {
+	const rules: { css: string; base: string }[] = [];
+	for (const sheet of Array.from(doc.styleSheets)) {
+		let list: CSSRuleList;
+		try {
+			list = sheet.cssRules;
+		} catch {
+			continue; // cross-origin sheet
+		}
+		for (const rule of Array.from(list)) {
+			if (/mjx/i.test(rule.cssText)) rules.push({ css: rule.cssText, base: sheet.href ?? doc.baseURI });
+		}
+	}
+
+	const inlined = new Map<string, Promise<string | null>>();
+	const URL_RE = /url\((["']?)([^"')]+)\1\)/g;
+	for (const { css, base } of rules) {
+		for (const m of css.matchAll(URL_RE)) {
+			const url = new URL(m[2], base).href;
+			if (!url.startsWith("data:") && !inlined.has(url)) inlined.set(url, toDataUrl(url));
+		}
+	}
+	const resolved = new Map<string, string | null>();
+	for (const [url, p] of inlined) resolved.set(url, await p);
+
+	return rules
+		.map(({ css, base }) =>
+			css.replace(URL_RE, (all: string, _q: string, u: string) => {
+				const data = resolved.get(new URL(u, base).href);
+				return data ? `url("${data}")` : all;
+			}),
+		)
+		.join("\n");
+}
+
+async function toDataUrl(url: string): Promise<string | null> {
+	try {
+		const res = await fetch(url);
+		if (!res.ok) return null;
+		const bytes = new Uint8Array(await res.arrayBuffer());
+		let bin = "";
+		for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+		return `data:${res.headers.get("content-type") || "font/woff2"};base64,${btoa(bin)}`;
+	} catch {
+		return null;
+	}
+}
