@@ -15,6 +15,10 @@ const MAX_ZOOM = 5;
 const ZOOM_STEP = 1.25;
 const SOURCE_PDF = "assets/source.pdf";
 const DEFAULT_DPI = 150;
+// Backing-store limits every platform honours (iOS caps a canvas at 16.7M pixels); a large
+// .xcanvas renders at a lower resolution rather than blank.
+const MAX_CANVAS_SIDE = 16384;
+const MAX_CANVAS_AREA = 16_777_216;
 
 interface PdfDocument extends PdfSource {
 	destroy(): Promise<void>;
@@ -231,7 +235,12 @@ export class XNoteView extends FileView {
 			const flowPage = this.flowPages?.[i];
 			const text = this.doc.flow && flowPage ? { flow: this.doc.flow, page: flowPage } : null;
 			try {
-				const formulas = await renderPage(canvas, page, manifest.style, this.assetUrls, scale, this.pdf, text, this.math);
+				const fitScale = Math.min(
+					scale,
+					MAX_CANVAS_SIDE / Math.max(page.width, page.height),
+					Math.sqrt(MAX_CANVAS_AREA / (page.width * page.height)),
+				);
+				const formulas = await renderPage(canvas, page, manifest.style, this.assetUrls, fitScale, this.pdf, text, this.math);
 				for (const f of formulas) this.math.mount(layer, f);
 			} catch (e) {
 				wrap.setText(`Failed to render page ${i + 1}: ${(e as Error).message}`);

@@ -1,4 +1,5 @@
 import { unzipSync } from "fflate";
+import { canvasToManifest, type CanvasManifest } from "./canvas.ts";
 import { parseFlowXml } from "./flow.ts";
 import type { Manifest, XNoteDocument } from "./types.ts";
 
@@ -8,6 +9,7 @@ const IMAGE_MIME: Record<string, string> = {
 	jpeg: "image/jpeg",
 	webp: "image/webp",
 	gif: "image/gif",
+	svg: "image/svg+xml",
 };
 
 function mimeFor(path: string): string {
@@ -15,13 +17,14 @@ function mimeFor(path: string): string {
 	return IMAGE_MIME[ext] ?? "application/octet-stream";
 }
 
-// Parse a raw .xnote (ZIP) file into its manifest, decoded image assets and flowing text.
+// Parse a raw .xnote or .xcanvas (ZIP) file into its manifest, decoded image assets and flowing text.
+// A canvas comes back as a one-page manifest cropped to its content.
 export function parseXNote(data: ArrayBuffer): XNoteDocument {
 	const files = unzipSync(new Uint8Array(data));
 
 	const manifestBytes = files["manifest.json"];
 	if (!manifestBytes) {
-		throw new Error("Not a valid .xnote file: manifest.json is missing.");
+		throw new Error("Not a valid .xnote or .xcanvas file: manifest.json is missing.");
 	}
 
 	let manifest: Manifest;
@@ -29,6 +32,10 @@ export function parseXNote(data: ArrayBuffer): XNoteDocument {
 		manifest = JSON.parse(new TextDecoder().decode(manifestBytes)) as Manifest;
 	} catch (e) {
 		throw new Error(`Could not parse manifest.json: ${(e as Error).message}`);
+	}
+
+	if (manifest.format === "xcanvas") {
+		manifest = canvasToManifest(manifest as unknown as CanvasManifest);
 	}
 
 	if (!Array.isArray(manifest.pages)) {
