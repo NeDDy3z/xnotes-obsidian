@@ -35,6 +35,10 @@ export interface Paragraph {
 	checked: boolean;
 	codeLang: string | null; // non-null marks a code line
 	headingLevel: number;
+	rule: boolean; // an empty line drawn as a hairline
+	breakBefore: boolean; // starts the next page
+	breakToPage: number | null; // with breakBefore, the earliest page it starts on
+	listStart: number | null; // the number an ordered item restarts its list at
 }
 
 export interface TableStyle {
@@ -143,7 +147,7 @@ export function flowMath(flow: TextFlow): { latex: string; display: boolean }[] 
 
 interface Styles {
 	chars: Map<string, CharStyle>;
-	paras: Map<string, [ParaAlign, number]>;
+	paras: Map<string, [ParaAlign, number, boolean]>;
 	tableWidths: Map<string, number>;
 	colWidths: Map<string, number>;
 	rowHeights: Map<string, number>;
@@ -311,7 +315,19 @@ export function normalizedWidths(widths: number[]): number[] {
 }
 
 function emptyParagraph(): Paragraph {
-	return { runs: [], align: "left", indent: 0, list: "none", checked: false, codeLang: null, headingLevel: 0 };
+	return {
+		runs: [],
+		align: "left",
+		indent: 0,
+		list: "none",
+		checked: false,
+		codeLang: null,
+		headingLevel: 0,
+		rule: false,
+		breakBefore: false,
+		breakToPage: null,
+		listStart: null,
+	};
 }
 
 function parseCharStyle(p: Element): CharStyle {
@@ -333,7 +349,7 @@ function parseCharStyle(p: Element): CharStyle {
 	};
 }
 
-function parseParaProps(p: Element): [ParaAlign, number] {
+function parseParaProps(p: Element): [ParaAlign, number, boolean] {
 	const a = attr(p, "text-align");
 	const align: ParaAlign =
 		a === "center" ? "center" : a === "right" || a === "end" ? "right" : a === "justify" ? "justify" : "left";
@@ -342,11 +358,11 @@ function parseParaProps(p: Element): [ParaAlign, number] {
 		const mm = parseFloat(attr(p, "margin-left")?.replace(/mm$/, "") ?? "");
 		indent = Number.isFinite(mm) ? Math.trunc(mm / INDENT_MM_PER_LEVEL) : 0;
 	}
-	return [align, clamp(indent, 0, MAX_INDENT)];
+	return [align, clamp(indent, 0, MAX_INDENT), attr(p, "break-before") === "page"];
 }
 
 function parseParagraph(p: Element, styles: Styles): Paragraph {
-	const [align, indent] = styles.paras.get(attr(p, "style-name") ?? "") ?? ["left", 0];
+	const [align, indent, breakBefore] = styles.paras.get(attr(p, "style-name") ?? "") ?? ["left", 0, false];
 	const list = (["bullet", "ordered", "check"] as const).find((k) => k === attr(p, "list")) ?? "none";
 	const heading = parseInt(attr(p, "heading") ?? "", 10);
 	const para: Paragraph = {
@@ -357,6 +373,11 @@ function parseParagraph(p: Element, styles: Styles): Paragraph {
 		checked: attr(p, "checked") === "true",
 		codeLang: attr(p, "code-lang"),
 		headingLevel: Number.isFinite(heading) ? clamp(heading, 0, MAX_HEADING) : 0,
+		rule: attr(p, "rule") === "true",
+		breakBefore,
+		breakToPage: breakBefore ? nonNegativeInt(attr(p, "break-page")) : null,
+		listStart:
+			list === "ordered" && p.parentElement?.localName === "list-item" ? nonNegativeInt(attr(p.parentElement, "start-value")) : null,
 	};
 	collectRuns(p, DEFAULT_STYLE, styles.chars, para.runs);
 	return para;
@@ -368,8 +389,14 @@ function collectRuns(node: Element, style: CharStyle, chars: Map<string, CharSty
 			appendText(out, child.nodeValue ?? "", style);
 		} else if (child instanceof Element) {
 			switch (child.localName) {
-				case "span":
-					collectRuns(child, chars.get(attr(child, "style-name") ?? "") ?? style, chars, out);
+				case "span": {
+					const own = chars.get(attr(child, "style-name") ?? "");
+					// A link wraps its spans as text:a; n-notes before 0.9.6 kept it in the span style instead.
+					collectRuns(child, own && style.link ? { ...own, link: style.link } : (own ?? style), chars, out);
+					break;
+				}
+				case "a":
+					collectRuns(child, { ...style, link: attr(child, "href")?.trim() || null }, chars, out);
 					break;
 				case "s":
 					appendText(out, " ".repeat(parseInt(attr(child, "c") ?? "1", 10) || 1), style);
@@ -382,6 +409,11 @@ function collectRuns(node: Element, style: CharStyle, chars: Map<string, CharSty
 			}
 		}
 	}
+}
+
+function nonNegativeInt(v: string | null): number | null {
+	const n = parseInt(v ?? "", 10);
+	return Number.isFinite(n) && n >= 0 ? n : null;
 }
 
 function appendText(out: Run[], text: string, style: CharStyle): void {

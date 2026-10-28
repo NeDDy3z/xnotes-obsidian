@@ -87,21 +87,33 @@ export interface TextItem {
 	math?: boolean; // text is LaTeX, drawn as a formula
 }
 
-export type Item = StrokeItem | ShapeItem | ImageItem | TableItem | TextItem;
+// A dropped colour's area: an SVG path in the unit box, stretched over rect.
+export interface FillItem {
+	kind: "fill";
+	rect: [number, number, number, number]; // x, y, w, h
+	path?: string;
+	fill_rgba: Rgba | null;
+	flip?: string; // "x", "y" or "xy", mirrored in the box
+	angle?: number; // radians, clockwise, about the box center
+}
+
+export type Item = StrokeItem | ShapeItem | ImageItem | TableItem | TextItem | FillItem;
 
 export interface Page {
 	width: number;
 	height: number;
 	pdf_page: number | null;
+	pdf_turn?: number; // clockwise quarter turns of the PDF page
 	items: Item[];
 	style?: PageStyle; // per-field override; missing fields inherit from the document style
 }
 
 export interface PageStyle {
 	page_color?: Rgba;
-	pattern?: string; // "grid", "lines", "dots", "none", ...
+	pattern?: string; // "grid", "lines", "dots", "none"
+	template?: string; // any other template, which only the app draws
 	spacing?: number;
-	pattern_color?: Rgba; // defaults to grey 25% (150,150,150,64)
+	pattern_color?: Rgba; // defaults to grey 50% (150,150,150,128)
 }
 
 export interface Manifest {

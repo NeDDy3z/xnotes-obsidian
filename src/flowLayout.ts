@@ -34,6 +34,8 @@ const LINK_COLOR: Rgba = [90, 156, 255, 255];
 const MATH_BG: Rgba = [88, 140, 216, 44];
 const MATH_ERROR_BG: Rgba = [214, 74, 68, 52];
 const MATH_ERROR_RULE: Rgba = [214, 74, 68, 190];
+const RULE_THICKNESS_PER_LINE = 10;
+const RULE_ALPHA = 90;
 
 type MathShow = "formula" | "source" | "error";
 
@@ -76,6 +78,7 @@ interface PlacedLine {
 	decos: Deco[];
 	marker: Marker | null;
 	codeLine: boolean;
+	rule: boolean;
 	codeLeft: number;
 	codeRight: number;
 }
@@ -235,7 +238,19 @@ class FlowLayout {
 				continue;
 			}
 			const para = block.para;
-			ordinal = para.list === "ordered" ? ordinal + 1 : 0;
+			if (para.breakBefore) {
+				if (cur.y > rectAt(cur.page).top + EPS) {
+					cur.page++;
+					cur.y = rectAt(cur.page).top;
+				}
+				// A break to a page further on skips the pages between; one already passed is a plain break.
+				const to = para.breakToPage;
+				if (to != null && to > cur.page && to < rects.length) {
+					cur.page = to;
+					cur.y = rects[to].top;
+				}
+			}
+			ordinal = para.list === "ordered" ? (para.listStart ?? ordinal + 1) : 0;
 			const indentPx = para.indent * INDENT_STEP_PX + (para.list !== "none" ? MARKER_GUTTER_PX : 0);
 			let rect = rectAt(cur.page);
 			let avail = Math.max(rect.right - rect.left - indentPx, MIN_LINE_WIDTH);
@@ -490,6 +505,7 @@ class FlowLayout {
 			decos,
 			marker,
 			codeLine: para.codeLang !== null,
+			rule: para.rule,
 			codeLeft: rect.left + indentPx,
 			codeRight: rect.right,
 		};
@@ -658,6 +674,10 @@ export function paintFlowPage(
 			if (d.math) {
 				fill(d.x0 - CHIP_PAD, line.top, d.x1 - d.x0 + 2 * CHIP_PAD, line.bottom - line.top, d.math === "error" ? MATH_ERROR_BG : MATH_BG);
 			}
+		}
+		if (line.rule) {
+			const t = Math.max((line.bottom - line.top) / RULE_THICKNESS_PER_LINE, 1);
+			fill(line.codeLeft, (line.top + line.bottom) / 2 - t / 2, line.codeRight - line.codeLeft, t, withAlpha(ink, RULE_ALPHA));
 		}
 		if (line.marker) paintMarker(ctx, line, line.marker, ink);
 		for (const seg of line.segs) {

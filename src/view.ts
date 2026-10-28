@@ -231,7 +231,7 @@ export class XNoteView extends FileView {
 			const flowPage = this.flowPages?.[i];
 			const text = this.doc.flow && flowPage ? { flow: this.doc.flow, page: flowPage } : null;
 			try {
-				const formulas = await renderPage(canvas, page, manifest.style, this.assetUrls, scale, this.pdf, text, this.math);
+				const formulas = await renderPage(canvas, page, manifest.style, manifest.writer ?? 0, this.assetUrls, scale, this.pdf, text, this.math);
 				for (const f of formulas) this.math.mount(layer, f);
 			} catch (e) {
 				wrap.setText(`Failed to render page ${i + 1}: ${(e as Error).message}`);

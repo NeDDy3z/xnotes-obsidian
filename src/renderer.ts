@@ -4,6 +4,7 @@ import type { MathPlacement, MathSetter } from "./math.ts";
 import { buildStrokeGeometry, type StrokeGeometry } from "./strokeEngine.ts";
 import { fontFamily, PT_TO_PX, rgbaCss } from "./text.ts";
 import type {
+	FillItem,
 	ImageItem,
 	Page,
 	PageStyle,
@@ -21,7 +22,8 @@ function cssOpaque(c: Rgba): string {
 // The slice of pdf.js used to paint a note's source PDF under its pages.
 export interface PdfSource {
 	getPage(pageNumber: number): Promise<{
-		getViewport(params: { scale: number }): { width: number; height: number };
+		rotate: number;
+		getViewport(params: { scale: number; rotation?: number }): { width: number; height: number };
 		render(params: { canvasContext: OffscreenCanvasRenderingContext2D; viewport: unknown }): {
 			promise: Promise<void>;
 		};
@@ -41,6 +43,7 @@ export async function renderPage(
 	canvas: HTMLCanvasElement,
 	page: Page,
 	style: PageStyle | undefined,
+	writer: number,
 	assetUrls: Map<string, string>,
 	scale: number,
 	pdf: PdfSource | null,
@@ -55,7 +58,7 @@ export async function renderPage(
 	ctx.setTransform(scale, 0, 0, scale, 0, 0);
 	ctx.clearRect(0, 0, page.width, page.height);
 
-	const pageStyle = { ...style, ...page.style };
+	const pageStyle = resolvePageStyle(style, page.style, writer);
 	if (pdf && page.pdf_page != null) {
 		drawPaper(ctx, page, pageStyle);
 		await drawPdfPage(ctx, pdf, page);
@@ -83,9 +86,30 @@ export async function renderPage(
 			case "image":
 				await drawImage(ctx, item, assetUrls);
 				break;
+			case "fill":
+				drawFill(ctx, item);
+				break;
 		}
 	}
 	return formulas;
+}
+
+const BUILT_IN_PATTERNS = ["lines", "dots", "grid"];
+// Writers from this versionCode on keep template settings per template rather than lending them to pages showing another one.
+const OWN_TEMPLATE_SETTINGS_SINCE = 67;
+
+// A page takes the note's spacing and pattern colour only while it shows the note's own template.
+export function resolvePageStyle(note: PageStyle | undefined, page: PageStyle | undefined, writer: number): PageStyle {
+	const noteKey = note?.pattern ?? note?.template ?? "none";
+	const key = page?.pattern ?? page?.template ?? noteKey;
+	if (key === noteKey) return { ...note, ...page };
+	const own: PageStyle = { page_color: note?.page_color, ...page };
+	if (writer >= OWN_TEMPLATE_SETTINGS_SINCE || key === "none") return own;
+	// Older notes let a page borrow the colour always, and the spacing between built-in rulings.
+	own.pattern_color ??= note?.pattern_color;
+	const noteHasTemplate = note?.pattern != null || note?.template != null;
+	if (!noteHasTemplate || (BUILT_IN_PATTERNS.includes(key) && BUILT_IN_PATTERNS.includes(noteKey))) own.spacing ??= note?.spacing;
+	return own;
 }
 
 function drawPaper(ctx: CanvasRenderingContext2D, page: Page, style?: PageStyle): void {
@@ -96,8 +120,10 @@ function drawPaper(ctx: CanvasRenderingContext2D, page: Page, style?: PageStyle)
 // The PDF page covers the whole note page, so no ruling is drawn over it.
 async function drawPdfPage(ctx: CanvasRenderingContext2D, pdf: PdfSource, page: Page): Promise<void> {
 	const pdfPage = await pdf.getPage((page.pdf_page ?? 0) + 1);
-	const natural = pdfPage.getViewport({ scale: 1 });
-	const viewport = pdfPage.getViewport({ scale: ctx.canvas.width / natural.width });
+	// A turned page turns its PDF with it, on top of the PDF's own rotation.
+	const rotation = (pdfPage.rotate + 90 * (page.pdf_turn ?? 0)) % 360;
+	const natural = pdfPage.getViewport({ scale: 1, rotation });
+	const viewport = pdfPage.getViewport({ scale: ctx.canvas.width / natural.width, rotation });
 	const raster = new OffscreenCanvas(Math.max(1, Math.round(viewport.width)), Math.max(1, Math.round(viewport.height)));
 	const rctx = raster.getContext("2d");
 	if (!rctx) return;
@@ -110,7 +136,7 @@ function drawBackground(ctx: CanvasRenderingContext2D, page: Page, style?: PageS
 
 	const pattern = style?.pattern ?? "none";
 	if (pattern === "none" || pattern === "blank") return;
-	const color = style?.pattern_color ?? [150, 150, 150, 64];
+	const color = style?.pattern_color ?? [150, 150, 150, 128];
 	const spacing = Math.min(200, Math.max(16, style?.spacing ?? 64));
 	ctx.save();
 	if (pattern === "lines") {
@@ -361,6 +387,20 @@ function applyOrientation(ctx: CanvasRenderingContext2D, o: number): void {
 }
 
 // ── shapes ──────────────────────────────────────────────────────────────────
+
+function drawFill(ctx: CanvasRenderingContext2D, item: FillItem): void {
+	const [x, y, w, h] = item.rect;
+	if (!item.path || !item.fill_rgba || w <= 0 || h <= 0) return;
+	ctx.save();
+	ctx.translate(x + w / 2, y + h / 2);
+	ctx.rotate(item.angle ?? 0);
+	ctx.scale(item.flip?.includes("x") ? -1 : 1, item.flip?.includes("y") ? -1 : 1);
+	ctx.translate(-w / 2, -h / 2);
+	ctx.scale(w, h);
+	ctx.fillStyle = rgbaCss(item.fill_rgba);
+	ctx.fill(new Path2D(item.path), "evenodd");
+	ctx.restore();
+}
 
 function drawShape(ctx: CanvasRenderingContext2D, item: ShapeItem): void {
 	ctx.save();
