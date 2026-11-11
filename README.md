@@ -1,6 +1,6 @@
 # xNotes Viewer for Obsidian
 
-Read-only viewer for `.xnote` handwritten notes from the [xnotes Android app](https://github.com/shardulvs/xnotes-android), on desktop and mobile.
+Read-only viewer for `.xnote` handwritten notes from the [xnotes Android app](https://github.com/shardulvs/xnotes-android), on desktop and mobile. Also supports the n-notes additions: flow text with headings, lists, checkboxes, code, tables, links and LaTeX, handwriting converted to LaTeX, and PDF backgrounds.
 
 Install from Settings, Community plugins, search "xNotes Viewer". Requires Obsidian 1.13.0+.
 
