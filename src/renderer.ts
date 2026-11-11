@@ -9,6 +9,7 @@ import type {
 	Page,
 	PageStyle,
 	Rgba,
+	Room,
 	ShapeItem,
 	StrokeItem,
 	TableItem,
@@ -61,13 +62,14 @@ export async function renderPage(
 	const pageStyle = resolvePageStyle(style, page.style, writer);
 	if (pdf && page.pdf_page != null) {
 		drawPaper(ctx, page, pageStyle);
+		drawRulingInRooms(ctx, page, pageStyle);
 		await drawPdfPage(ctx, pdf, page);
 	} else {
 		drawBackground(ctx, page, pageStyle);
 	}
 
 	const formulas: MathPlacement[] = [];
-	if (text) paintFlowPage(ctx, text.page, text.flow, pageStyle.page_color ?? [255, 255, 255, 255], formulas);
+	if (text) paintFlowPage(ctx, text.page, text.flow, pageStyle.page_color ?? [255, 255, 255, 255], page.style?.text_color, formulas);
 
 	for (const item of page.items) {
 		switch (item.kind) {
@@ -117,18 +119,89 @@ function drawPaper(ctx: CanvasRenderingContext2D, page: Page, style?: PageStyle)
 	ctx.fillRect(0, 0, page.width, page.height);
 }
 
-// The PDF page covers the whole note page, so no ruling is drawn over it.
+// ── rooms ───────────────────────────────────────────────────────────────────
+
+const ROOM_EPS = 1e-6;
+
+interface Band {
+	from: number;
+	to: number;
+	shift: number;
+}
+
+// The rooms on one axis in order, as the app loads them: whole, apart, and leaving the page some size of its own.
+function roomsOn(page: Page, sideways: boolean): Room[] {
+	const length = sideways ? page.width : page.height;
+	const out: Room[] = [];
+	let total = 0,
+		end = -Infinity;
+	const rooms = (page.rooms ?? [])
+		.filter((r) => (r.sideways ?? false) === sideways && Number.isFinite(r.at) && Number.isFinite(r.size) && r.size > 0)
+		.sort((a, b) => a.at - b.at);
+	for (const r of rooms) {
+		if (r.at <= end || total + r.size >= length) continue;
+		out.push(r);
+		total += r.size;
+		end = r.at + r.size;
+	}
+	return out;
+}
+
+// The page before any room opened, cut along one axis into the stretches between rooms, each with how far it moved.
+function roomBands(rooms: Room[], length: number): Band[] {
+	const out: Band[] = [];
+	let from = 0,
+		shift = 0;
+	for (const r of rooms) {
+		const cut = r.at - shift;
+		if (cut - from > ROOM_EPS && cut > 0) out.push({ from: Math.max(from, 0), to: Math.min(cut, length), shift });
+		from = Math.max(from, cut);
+		shift += r.size;
+	}
+	if (length - from > ROOM_EPS) out.push({ from: Math.max(from, 0), to: length, shift });
+	return out.filter((b) => b.to - b.from > ROOM_EPS);
+}
+
+// Room is paper: on a PDF page it shows the page's ruling, which the PDF covers everywhere else.
+function drawRulingInRooms(ctx: CanvasRenderingContext2D, page: Page, style: PageStyle): void {
+	const rooms = [...roomsOn(page, false), ...roomsOn(page, true)];
+	if (rooms.length === 0) return;
+	ctx.save();
+	ctx.beginPath();
+	for (const r of rooms) {
+		if (r.sideways) ctx.rect(r.at, 0, r.size, page.height);
+		else ctx.rect(0, r.at, page.width, r.size);
+	}
+	ctx.clip();
+	drawBackground(ctx, page, style);
+	ctx.restore();
+}
+
+// The PDF page covers the note page as it was before any room, laid in bands round the room inserted since.
 async function drawPdfPage(ctx: CanvasRenderingContext2D, pdf: PdfSource, page: Page): Promise<void> {
 	const pdfPage = await pdf.getPage((page.pdf_page ?? 0) + 1);
 	// A turned page turns its PDF with it, on top of the PDF's own rotation.
 	const rotation = (pdfPage.rotate + 90 * (page.pdf_turn ?? 0)) % 360;
+	const xs = roomsOn(page, true),
+		ys = roomsOn(page, false);
+	const sw = page.width - xs.reduce((a, r) => a + r.size, 0);
+	const sh = page.height - ys.reduce((a, r) => a + r.size, 0);
 	const natural = pdfPage.getViewport({ scale: 1, rotation });
-	const viewport = pdfPage.getViewport({ scale: ctx.canvas.width / natural.width, rotation });
+	const viewport = pdfPage.getViewport({ scale: (ctx.canvas.width * (sw / page.width)) / natural.width, rotation });
 	const raster = new OffscreenCanvas(Math.max(1, Math.round(viewport.width)), Math.max(1, Math.round(viewport.height)));
 	const rctx = raster.getContext("2d");
 	if (!rctx) return;
 	await pdfPage.render({ canvasContext: rctx, viewport }).promise;
-	ctx.drawImage(raster, 0, 0, page.width, page.height);
+	for (const by of roomBands(ys, sh)) {
+		for (const bx of roomBands(xs, sw)) {
+			ctx.save();
+			ctx.beginPath();
+			ctx.rect(bx.from + bx.shift, by.from + by.shift, bx.to - bx.from, by.to - by.from);
+			ctx.clip();
+			ctx.drawImage(raster, bx.shift, by.shift, sw, sh);
+			ctx.restore();
+		}
+	}
 }
 
 function drawBackground(ctx: CanvasRenderingContext2D, page: Page, style?: PageStyle): void {
@@ -178,54 +251,66 @@ function drawBackground(ctx: CanvasRenderingContext2D, page: Page, style?: PageS
 
 // ── strokes ────────────────────────────────────────────────────────────────
 
-// The ribbon is a brush disc swept down the centerline: a filled disc at every
-// point, plus the quad bridging each consecutive pair. Each convex piece is
-// filled SEPARATELY (not merged into one path) so overlaps never cancel under the
-// winding rule, which gives round caps and joins for free with no holes.
+// The ribbon is a brush disc swept down the centerline: one nonzero path of capsules, the
+// tangent hulls of each consecutive pair of discs, all wound the same way so overlaps union
+// into solid ink with round caps and joins and no holes at sharp turns.
 function fillDiskRibbon(ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D, geom: StrokeGeometry, fill: string): void {
 	const c = geom.centerline;
-	const hwv = geom.halfWidths;
-	const n = hwv.length;
+	const r = geom.halfWidths;
+	const n = r.length;
 	ctx.fillStyle = fill;
-	for (let i = 0; i < n; i++) {
-		const h = hwv[i];
-		if (h <= 0) continue;
-		ctx.beginPath();
-		ctx.arc(c[2 * i], c[2 * i + 1], h, 0, Math.PI * 2);
-		ctx.fill();
-	}
-	for (let i = 0; i < n - 1; i++) {
-		const ax = c[2 * i],
-			ay = c[2 * i + 1],
-			bx = c[2 * (i + 1)],
-			by = c[2 * (i + 1) + 1];
-		let dx = bx - ax,
-			dy = by - ay;
-		const len = Math.hypot(dx, dy);
-		if (len < 1e-9) continue;
-		dx /= len;
-		dy /= len;
-		const nx = -dy,
-			ny = dx;
-		const ha = hwv[i],
-			hb = hwv[i + 1];
-		ctx.beginPath();
-		ctx.moveTo(ax + nx * ha, ay + ny * ha);
-		ctx.lineTo(bx + nx * hb, by + ny * hb);
-		ctx.lineTo(bx - nx * hb, by - ny * hb);
-		ctx.lineTo(ax - nx * ha, ay - ny * ha);
-		ctx.closePath();
-		ctx.fill();
-	}
+	ctx.beginPath();
+	if (n === 1) addDisc(ctx, c[0], c[1], r[0]);
+	for (let i = 0; i < n - 1; i++) addCapsule(ctx, c[2 * i], c[2 * i + 1], r[i], c[2 * i + 2], c[2 * i + 3], r[i + 1]);
+	ctx.fill();
 }
+
+type PathTarget = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
+
+function addDisc(ctx: PathTarget, x: number, y: number, r: number): void {
+	if (r <= 0) return;
+	ctx.moveTo(x + r, y);
+	ctx.arc(x, y, r, 0, Math.PI * 2);
+}
+
+function addCapsule(ctx: PathTarget, x0: number, y0: number, r0: number, x1: number, y1: number, r1: number): void {
+	const dx = x1 - x0,
+		dy = y1 - y0;
+	const d = Math.hypot(dx, dy);
+	// One disc holds the other, so their hull is the larger disc.
+	if (d <= Math.abs(r1 - r0) + 1e-9) {
+		if (r0 >= r1) addDisc(ctx, x0, y0, r0);
+		else addDisc(ctx, x1, y1, r1);
+		return;
+	}
+	const ux = dx / d,
+		uy = dy / d;
+	const s = (r0 - r1) / d;
+	const k = Math.sqrt(1 - s * s);
+	const lx = ux * s + uy * k,
+		ly = uy * s - ux * k;
+	const rx = ux * s - uy * k,
+		ry = uy * s + ux * k;
+	const front = Math.PI - 2 * Math.asin(s);
+	ctx.moveTo(x0 + r0 * lx, y0 + r0 * ly);
+	ctx.lineTo(x1 + r1 * lx, y1 + r1 * ly);
+	if (r1 > 0) ctx.arc(x1, y1, r1, Math.atan2(ly, lx), Math.atan2(ly, lx) + front);
+	ctx.lineTo(x0 + r0 * rx, y0 + r0 * ry);
+	if (r0 > 0) ctx.arc(x0, y0, r0, Math.atan2(ry, rx), Math.atan2(ry, rx) + 2 * Math.PI - front);
+	ctx.closePath();
+}
+
+// What a stroke saved without a colour has always loaded as.
+const LEGACY_INK: Rgba = [0, 230, 118, 255];
 
 // The config rgba with the tool alpha scale applied: highlighter uses its
 // highlighter_alpha, every other tool is opaque.
 function renderColor(stroke: StrokeItem): Rgba {
 	const cfg = stroke.config;
+	const rgba = cfg.rgba ?? LEGACY_INK;
 	const factor = stroke.tool === "highlighter" ? (cfg.highlighter_alpha ?? 0.5) : 1;
-	const a = Math.max(0, Math.min(255, Math.round((cfg.rgba[3] ?? 255) * factor)));
-	return [cfg.rgba[0], cfg.rgba[1], cfg.rgba[2], a];
+	const a = Math.max(0, Math.min(255, Math.round((rgba[3] ?? 255) * factor)));
+	return [rgba[0], rgba[1], rgba[2], a];
 }
 
 // Fill the opaque stroke into a full-canvas layer, then composite it once at the
@@ -255,7 +340,55 @@ function compositeLayer(
 	ctx.restore();
 }
 
+// Ink Insert space cut shows only on the near side of each cut edge.
 function drawStroke(ctx: CanvasRenderingContext2D, stroke: StrokeItem): void {
+	const cuts = (stroke.cuts ?? []).filter((c) => c.length >= 4 && Math.hypot(c[2], c[3]) > 1e-9);
+	if (cuts.length === 0) return drawInk(ctx, stroke);
+	const shown = clipToCuts(cuts);
+	if (shown.length < 3) return;
+	ctx.save();
+	ctx.beginPath();
+	ctx.moveTo(shown[0][0], shown[0][1]);
+	for (let i = 1; i < shown.length; i++) ctx.lineTo(shown[i][0], shown[i][1]);
+	ctx.closePath();
+	ctx.clip();
+	drawInk(ctx, stroke);
+	ctx.restore();
+}
+
+// A rect far past any page, cut down to the side of every edge that shows (Sutherland-Hodgman).
+function clipToCuts(cuts: number[][]): number[][] {
+	const far = 1e6;
+	let poly = [
+		[-far, -far],
+		[far, -far],
+		[far, far],
+		[-far, far],
+	];
+	for (const [x, y, rawNx, rawNy] of cuts) {
+		const len = Math.hypot(rawNx, rawNy);
+		const nx = rawNx / len,
+			ny = rawNy / len;
+		const past = (p: number[]) => (p[0] - x) * nx + (p[1] - y) * ny;
+		const out: number[][] = [];
+		for (let i = 0; i < poly.length; i++) {
+			const a = poly[i],
+				b = poly[(i + 1) % poly.length];
+			const da = past(a),
+				db = past(b);
+			if (da <= 0) out.push(a);
+			if ((da < 0 && db > 0) || (da > 0 && db < 0)) {
+				const t = da / (da - db);
+				out.push([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]);
+			}
+		}
+		poly = out;
+		if (poly.length === 0) break;
+	}
+	return poly;
+}
+
+function drawInk(ctx: CanvasRenderingContext2D, stroke: StrokeItem): void {
 	const geom = buildStrokeGeometry(stroke);
 	if (geom.halfWidths.length === 0) return;
 	const color = renderColor(stroke);
@@ -343,47 +476,54 @@ async function drawImage(
 ): Promise<void> {
 	const url = assetUrls.get(item.asset) ?? assetUrls.get(item.asset.replace(/\\/g, "/"));
 	if (!url) return;
-	const img = await loadImage(url);
 	const [x, y, w, h] = item.rect;
+	if (w <= 0 || h <= 0) return;
+	const img = await loadImage(url);
+	const part = imagePart(item.part);
+	const o = (((item.orientation ?? 0) % 360) + 360) % 360;
+	const turned = o === 90 || o === 270;
+	const uw = turned ? h : w,
+		uh = turned ? w : h;
 	ctx.save();
-	// Rotate `angle` (radians) then apply the EXIF orientation, both about the rect center.
+	// Turn by `angle`, mirror by `flip`, then the quarter-turn `orientation`, all about the rect center.
 	ctx.translate(x + w / 2, y + h / 2);
 	if (item.angle) ctx.rotate(item.angle);
-	applyOrientation(ctx, item.orientation ?? 0);
+	if (part) {
+		ctx.beginPath();
+		ctx.rect(-w / 2, -h / 2, w, h);
+		ctx.clip();
+	}
+	ctx.scale(item.flip?.includes("x") ? -1 : 1, item.flip?.includes("y") ? -1 : 1);
+	if (o) ctx.rotate((o * Math.PI) / 180);
 	try {
-		ctx.drawImage(img, -w / 2, -h / 2, w, h);
+		if (!part) {
+			ctx.drawImage(img, -uw / 2, -uh / 2, uw, uh);
+		} else {
+			// The whole picture laid where its part fills the box, the clip showing only the part.
+			const [pl, pt, pr, pb] = part;
+			const fw = uw / (pr - pl),
+				fh = uh / (pb - pt);
+			const cx = (0.5 - (pl + pr) / 2) * fw,
+				cy = (0.5 - (pt + pb) / 2) * fh;
+			ctx.drawImage(img, cx - fw / 2, cy - fh / 2, fw, fh);
+		}
 	} catch {
 		// ignore undecodable image
 	}
 	ctx.restore();
 }
 
-function applyOrientation(ctx: CanvasRenderingContext2D, o: number): void {
-	switch (o) {
-		case 2:
-			ctx.scale(-1, 1);
-			break;
-		case 3:
-			ctx.rotate(Math.PI);
-			break;
-		case 4:
-			ctx.scale(1, -1);
-			break;
-		case 5:
-			ctx.rotate(Math.PI / 2);
-			ctx.scale(1, -1);
-			break;
-		case 6:
-			ctx.rotate(Math.PI / 2);
-			break;
-		case 7:
-			ctx.rotate(-Math.PI / 2);
-			ctx.scale(1, -1);
-			break;
-		case 8:
-			ctx.rotate(-Math.PI / 2);
-			break;
-	}
+// The slice of a picture Insert space left, as left, top, right, bottom fractions; null for all or none of it.
+function imagePart(part: ImageItem["part"]): [number, number, number, number] | null {
+	if (!part || part.length < 4) return null;
+	const clamp = (v: number) => Math.min(1, Math.max(0, v));
+	const l = clamp(part[0]),
+		t = clamp(part[1]),
+		r = clamp(part[0] + part[2]),
+		b = clamp(part[1] + part[3]);
+	if (r - l <= 1e-9 || b - t <= 1e-9) return null;
+	if (l <= 1e-4 && t <= 1e-4 && r >= 1 - 1e-4 && b >= 1 - 1e-4) return null;
+	return [l, t, r, b];
 }
 
 // ── shapes ──────────────────────────────────────────────────────────────────
@@ -642,6 +782,11 @@ function drawText(ctx: CanvasRenderingContext2D, item: TextItem, math: MathSette
 	}
 	ctx.save();
 	ctx.fillStyle = rgbaCss(item.rgba);
+	// A link to a stored document draws a paperclip before its text.
+	const inset = item.link?.startsWith("xnotes-doc:") ? item.point_size * 1.3 : 0;
+	if (inset > 0) drawPaperclip(ctx, item);
+	const left = item.pos[0] + inset,
+		width = item.width - inset;
 	const weight = item.bold ? "700" : "400";
 	const slant = item.italic ? "italic" : "normal";
 	ctx.font = `${slant} ${weight} ${px}px ${fontFamily(item.font_face)}`;
@@ -652,20 +797,44 @@ function drawText(ctx: CanvasRenderingContext2D, item: TextItem, math: MathSette
 
 	const lines: string[] = [];
 	for (const rawLine of item.text.split("\n")) {
-		for (const line of wrapLine(ctx, rawLine, item.width)) lines.push(line);
+		for (const line of wrapLine(ctx, rawLine, width)) lines.push(line);
 	}
 
 	let y = item.pos[1];
 	for (const line of lines) {
 		const w = ctx.measureText(line).width;
-		let x = item.pos[0];
-		if (align === "center") x = item.pos[0] + (item.width - w) / 2;
-		else if (align === "right") x = item.pos[0] + (item.width - w);
+		let x = left;
+		if (align === "center") x = left + (width - w) / 2;
+		else if (align === "right") x = left + (width - w);
 		ctx.fillText(line, x, y);
 		if (item.underline) ctx.fillRect(x, y + px * 1.05, w, ruleWidth);
 		if (item.strike) ctx.fillRect(x, y + px * 0.6, w, ruleWidth);
 		y += lineHeight;
 	}
+	ctx.restore();
+}
+
+// The toolbar's Insert paperclip (Feather), flattened on its 24-unit grid.
+const PAPERCLIP = [
+	21.44, 11.05, 12.25, 20.24, 11.79, 20.65, 11.31, 21.01, 10.26, 21.56, 9.15, 21.89, 8.01, 22.0, 6.86, 21.89, 5.75, 21.56,
+	4.7, 21.01, 4.22, 20.65, 3.76, 20.24, 3.35, 19.78, 2.99, 19.3, 2.44, 18.25, 2.11, 17.14, 2.0, 16.0, 2.11, 14.85, 2.44,
+	13.74, 2.99, 12.69, 3.35, 12.21, 3.76, 11.75, 12.95, 2.56, 13.58, 2.05, 14.27, 1.68, 15.02, 1.46, 15.78, 1.39, 16.54,
+	1.46, 17.29, 1.68, 17.98, 2.05, 18.61, 2.56, 19.12, 3.19, 19.49, 3.88, 19.71, 4.63, 19.78, 5.39, 19.71, 6.15, 19.49,
+	6.9, 19.12, 7.59, 18.61, 8.22, 9.41, 17.41, 9.1, 17.67, 8.75, 17.85, 8.38, 17.96, 7.99, 18.0, 7.61, 17.96, 7.24, 17.85,
+	6.89, 17.67, 6.58, 17.41, 6.32, 17.1, 6.14, 16.75, 6.03, 16.38, 5.99, 16.0, 6.03, 15.61, 6.14, 15.24, 6.32, 14.89, 6.58,
+	14.58, 15.07, 6.1,
+];
+
+function drawPaperclip(ctx: CanvasRenderingContext2D, item: TextItem): void {
+	const k = item.point_size / 24;
+	const x = item.pos[0],
+		top = item.pos[1] + item.point_size * 0.15;
+	ctx.save();
+	ctx.strokeStyle = rgbaCss(item.rgba);
+	ctx.lineWidth = 2 * k;
+	ctx.beginPath();
+	for (let i = 0; i < PAPERCLIP.length; i += 2) ctx.lineTo(x + PAPERCLIP[i] * k, top + PAPERCLIP[i + 1] * k);
+	ctx.stroke();
 	ctx.restore();
 }
 

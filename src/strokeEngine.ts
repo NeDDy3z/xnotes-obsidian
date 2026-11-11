@@ -15,11 +15,18 @@ const SMOOTH_LEN = (REFERENCE_SPACING * (1 - ALPHA)) / ALPHA; // 1.5
 const HEAD_LEN = 8.0;
 const OPEN_LEN = 8.0;
 const CLOSE_LEN = 8.0;
+const NIB_RATE_WIDTH = 6.0;
+const REVERSAL_FROM_DEG = 120.0;
+const REVERSAL_FULL_DEG = 160.0;
+const REVERSAL_WAIT = 0.5;
+const REVERSAL_MIN_WAIT = 3.0;
+const REVERSAL_FROM_COS = Math.cos((REVERSAL_FROM_DEG * Math.PI) / 180);
 const DOT_DIR_Y = 1.5;
-const SPEED_LO = 0.0;
 const SPEED_HI = 0.6;
-const SPEED_WINDOW_MS = 40.0;
-const MIN_DT = 1.0;
+const SPEED_WINDOW_MS = 25.0;
+const SPEED_FLOOR = 0.1;
+const DEFAULT_SPEED_SMOOTHING = 0.25;
+const SPEED_BLUR_REACH = 3.0;
 const TAPER_MIN_LEN = 8.0;
 const CAP_HOLD_SAMPLES = 4;
 const TAPER_TAIL = 0.01;
@@ -38,6 +45,8 @@ interface BuildConfig {
 	m: number; // pressureMinFactor
 	ds: number; // directionStrength
 	speedStrength: number;
+	speedTop: number;
+	speedSmoothing: number; // in pen widths
 	taperEnabled: boolean;
 	taperMinFactor: number;
 	speedScale: number;
@@ -108,63 +117,87 @@ function holdEndPressure(p: Float64Array): void {
 	for (let i = n - w; i < n; i++) if (p[i] < tailFloor) p[i] = tailFloor;
 }
 
-function speedFactorAt(
-	times: Float64Array,
-	cum: Float64Array,
-	n: number,
-	i: number,
-	cursor: Int32Array,
-	speedStrength: number,
-	speedScale: number,
-): number {
-	const t0 = times[0],
-		tN = times[n - 1];
-	const half = SPEED_WINDOW_MS;
-	let a = times[i] - half,
-		b = times[i] + half;
-	if (a < t0) {
-		b += t0 - a;
-		a = t0;
-	}
-	if (b > tN) {
-		a -= b - tN;
-		b = tN;
-		if (a < t0) a = t0;
-	}
-	let lo = cursor[0],
-		hi = cursor[1];
-	while (lo < i && times[lo] < a) lo++;
-	while (hi < n - 1 && times[hi + 1] <= b) hi++;
-	cursor[0] = lo;
-	cursor[1] = hi;
-	let l = lo,
-		h = hi;
-	if (h <= l) {
-		if (h < n - 1) h++;
-		else l--;
-	}
-	const dist = (cum[h] - cum[l]) * speedScale;
-	const dt = Math.max(times[h] - times[l], MIN_DT);
-	return 1 - speedStrength * smoothstep(SPEED_LO, SPEED_HI, dist / dt);
-}
-
-function speedFactors(
+// Raw travel per moving ms in a window around each sample, as a width factor, blurred along `path`.
+function speedFactorsOver(
 	times: Float64Array,
 	steps: Float64Array,
-	speedStrength: number,
+	path: Float64Array,
+	strength: number,
+	top: number,
+	sigma: number,
 	speedScale: number,
-): Float64Array | null {
-	const n = times.length;
-	if (speedStrength <= 0 || n < 2) return null;
-	const t0 = times[0],
-		tN = times[n - 1];
-	if (tN - t0 <= 0) return null;
-	const cum = new Float64Array(n);
-	for (let i = 1; i < n; i++) cum[i] = cum[i - 1] + steps[i];
+): Float64Array {
+	const n = steps.length;
 	const out = new Float64Array(n).fill(1);
-	const cursor = new Int32Array(2);
-	for (let i = 0; i < n; i++) out[i] = speedFactorAt(times, cum, n, i, cursor, speedStrength, speedScale);
+	if (strength <= 0 || n < 2) return out;
+	// A step crossed slower than the floor counts as the pen holding still.
+	const floor = speedScale > 0 ? (SPEED_FLOOR * top) / speedScale : 0;
+	const tau = new Float64Array(n);
+	const cum = new Float64Array(n);
+	for (let i = 1; i < n; i++) {
+		const dt = Math.max(times[i] - times[i - 1], 0);
+		tau[i] = tau[i - 1] + (floor > 0 ? Math.min(dt, steps[i] / floor) : dt);
+		cum[i] = cum[i - 1] + steps[i];
+	}
+	const f = new Float64Array(n);
+	const window = new Int32Array(2);
+	for (let i = 0; i < n; i++) {
+		const v = windowSpeed(tau, cum, n, i, window);
+		f[i] = 1 - strength * smoothstep(0, top, v * speedScale);
+	}
+	const blur = new Int32Array(1);
+	for (let i = 0; i < n; i++) out[i] = blurAt(f, path, n, i, sigma, blur);
 	return out;
+}
+
+function windowSpeed(tau: Float64Array, cum: Float64Array, n: number, i: number, cursor: Int32Array): number {
+	const total = tau[n - 1];
+	if (total <= 0) return 0;
+	let a = tau[i] - SPEED_WINDOW_MS;
+	let b = tau[i] + SPEED_WINDOW_MS;
+	if (a < 0) {
+		b -= a;
+		a = 0;
+	}
+	if (b > total) {
+		a = Math.max(a - (b - total), 0);
+		b = total;
+	}
+	if (b <= a) return 0;
+	return (arcAt(tau, cum, n, b, cursor, 1) - arcAt(tau, cum, n, a, cursor, 0)) / (b - a);
+}
+
+function arcAt(tau: Float64Array, cum: Float64Array, n: number, x: number, cursor: Int32Array, end: number): number {
+	let k = cursor[end];
+	while (k < n - 1 && tau[k] < x) k++;
+	cursor[end] = k;
+	if (k === 0 || tau[k] < x) return cum[k];
+	const t0 = tau[k - 1];
+	const span = tau[k] - t0;
+	return span > 0 ? cum[k - 1] + ((cum[k] - cum[k - 1]) * (x - t0)) / span : cum[k];
+}
+
+// A triweight bell of `sigma`, each sample weighted by the arc around it.
+function blurAt(f: Float64Array, path: Float64Array, n: number, i: number, sigma: number, cursor: Int32Array): number {
+	if (sigma <= 0) return f[i];
+	const reach = SPEED_BLUR_REACH * sigma;
+	const at = path[i];
+	let lo = cursor[0];
+	while (lo < i && path[lo] < at - reach) lo++;
+	cursor[0] = lo;
+	let num = 0,
+		den = 0;
+	for (let j = lo; j < n; j++) {
+		const d = path[j] - at;
+		if (d > reach) break;
+		const own = (j > 0 ? path[j] - path[j - 1] : 0) + (j < n - 1 ? path[j + 1] - path[j] : 0);
+		const u = d / reach;
+		const q = 1 - u * u;
+		const w = q * q * q * own;
+		num += w * f[j];
+		den += w;
+	}
+	return den > 0 ? num / den : f[i];
 }
 
 function taperFactors(cum: Float64Array, taperMinFactor: number, smoothScale: number): Float64Array {
@@ -208,24 +241,102 @@ function nibStep(d: number, target: number, step: number, openLen: number, close
 }
 
 function nibDirection(
+	rx: Float64Array,
+	ry: Float64Array,
+	rcum: Float64Array,
 	ty: Float64Array,
 	steps: Float64Array,
 	openLen: number,
 	closeLen: number,
+	wait: number,
 	seed: number,
 	holdUntil: number,
 ): Float64Array {
-	const out = new Float64Array(ty.length);
+	const n = ty.length;
+	const out = new Float64Array(n);
+	const scratch = new Float64Array(6);
 	let d = seed;
-	for (let i = 0; i < ty.length; i++) {
+	for (let i = 0; i < n; i++) {
 		if (i <= holdUntil) {
 			out[i] = seed;
 			continue;
 		}
 		d = nibStep(d, ty[i], i === 0 ? 0 : steps[i], openLen, closeLen);
+		// A thin run turning back into a thick one starts thick at the turn.
+		if (reversalAt(rx, ry, rcum, n, i, wait, scratch) && scratch[5] > d) d += scratch[4] * (scratch[5] - d);
 		out[i] = d;
 	}
 	return out;
+}
+
+// Whether raw sample i is the sharpest point of a turn past REVERSAL_FROM_DEG whose new stroke heads back for `wait`.
+// Leaves the jump's share in scratch[4] and its target in scratch[5].
+function reversalAt(
+	rx: Float64Array,
+	ry: Float64Array,
+	rcum: Float64Array,
+	n: number,
+	i: number,
+	wait: number,
+	scratch: Float64Array,
+): boolean {
+	if (i < 1 || i + 1 >= n || wait <= 0 || rcum[n - 1] <= rcum[i + 1] + wait) return false;
+	const c = turnCos(rx, ry, rcum, n, i, wait, scratch);
+	if (c > REVERSAL_FROM_COS) return false;
+	const inX = rx[i] - scratch[0],
+		inY = ry[i] - scratch[1];
+	const outX = scratch[2] - rx[i],
+		outY = scratch[3] - ry[i];
+	if (c > turnCos(rx, ry, rcum, n, i - 1, wait, scratch) || c >= turnCos(rx, ry, rcum, n, i + 1, wait, scratch)) return false;
+	for (let k = i + 1; k < n && rcum[k] <= rcum[i] + wait; k++) {
+		if ((rx[k] - rx[k - 1]) * inX + (ry[k] - ry[k - 1]) * inY > 0) return false;
+	}
+	const deg = (Math.acos(Math.min(1, Math.max(-1, c))) * 180) / Math.PI;
+	scratch[4] = smoothstep(REVERSAL_FROM_DEG, REVERSAL_FULL_DEG, deg);
+	scratch[5] = Math.min(1, Math.max(-1, outY / Math.hypot(outX, outY)));
+	return scratch[4] > 0;
+}
+
+// Cosine of the turn at j between the chords `wait` long either side of it, 1 where either is missing.
+function turnCos(
+	rx: Float64Array,
+	ry: Float64Array,
+	rcum: Float64Array,
+	n: number,
+	j: number,
+	wait: number,
+	scratch: Float64Array,
+): number {
+	if (j <= 0 || j >= n - 1 || rcum[j] - wait < 0 || rcum[j] + wait > rcum[n - 1]) return 1;
+	pointAt(rx, ry, rcum, n, rcum[j] - wait, scratch, 0);
+	pointAt(rx, ry, rcum, n, rcum[j] + wait, scratch, 2);
+	const ix = rx[j] - scratch[0],
+		iy = ry[j] - scratch[1];
+	const ox = scratch[2] - rx[j],
+		oy = scratch[3] - ry[j];
+	const li = Math.hypot(ix, iy),
+		lo = Math.hypot(ox, oy);
+	if (li < MIN_TANGENT_LEN || lo < MIN_TANGENT_LEN) return 1;
+	return (ix * ox + iy * oy) / (li * lo);
+}
+
+function pointAt(x: Float64Array, y: Float64Array, cum: Float64Array, n: number, s: number, out: Float64Array, at: number): void {
+	let lo = 0,
+		hi = n - 1;
+	while (lo < hi) {
+		const mid = (lo + hi) >>> 1;
+		if (cum[mid] < s) lo = mid + 1;
+		else hi = mid;
+	}
+	if (lo === 0) {
+		out[at] = x[0];
+		out[at + 1] = y[0];
+		return;
+	}
+	const span = cum[lo] - cum[lo - 1];
+	const f = span > 0 ? (s - cum[lo - 1]) / span : 1;
+	out[at] = x[lo - 1] + (x[lo] - x[lo - 1]) * f;
+	out[at + 1] = y[lo - 1] + (y[lo] - y[lo - 1]) * f;
 }
 
 function capTail(dir: Float64Array, cum: Float64Array, window: number): void {
@@ -256,6 +367,8 @@ function buildGeometry(samples: number[][], cfg: BuildConfig): StrokeGeometry {
 		m,
 		ds,
 		speedStrength,
+		speedTop,
+		speedSmoothing,
 		taperEnabled,
 		taperMinFactor,
 		speedScale,
@@ -269,7 +382,9 @@ function buildGeometry(samples: number[][], cfg: BuildConfig): StrokeGeometry {
 		rawY = new Float64Array(n),
 		rawP = new Float64Array(n);
 	let timed = false;
+	let kept = true;
 	const rawT = new Float64Array(n);
+	const rawW = new Float64Array(n);
 	for (let i = 0; i < n; i++) {
 		const s = samples[i];
 		rawX[i] = s[0] ?? 0;
@@ -278,6 +393,8 @@ function buildGeometry(samples: number[][], cfg: BuildConfig): StrokeGeometry {
 		const t = s.length > 3 ? (s[3] ?? 0) : 0;
 		rawT[i] = t;
 		if (t !== 0) timed = true;
+		rawW[i] = s.length > 4 ? (s[4] ?? 0) : 0;
+		if (!(rawW[i] > 0)) kept = false;
 	}
 
 	const steps = new Float64Array(n);
@@ -330,7 +447,9 @@ function buildGeometry(samples: number[][], cfg: BuildConfig): StrokeGeometry {
 		}
 	}
 
-	const needArc = ds > 0 || taperEnabled;
+	// The speed pen's kept widths, else the ones its timing gives, blurred along the smoothed path.
+	const speedOn = speedStrength > 0 && (kept || timed);
+	const needArc = ds > 0 || taperEnabled || (speedOn && !kept);
 	const dirSteps = new Float64Array(needArc ? n : 0);
 	const cum = new Float64Array(dirSteps.length);
 	if (needArc)
@@ -339,18 +458,30 @@ function buildGeometry(samples: number[][], cfg: BuildConfig): StrokeGeometry {
 			cum[i] = cum[i - 1] + dirSteps[i];
 		}
 
-	const sf = speedStrength > 0 && timed ? speedFactors(rawT, steps, speedStrength, speedScale) : null;
+	const sf = !speedOn
+		? null
+		: kept
+			? rawW
+			: speedFactorsOver(rawT, steps, cum, speedStrength, speedTop, speedSmoothing * baseWidth, speedScale);
 	const tf = taperEnabled ? taperFactors(cum, taperMinFactor, smoothScale) : null;
 
 	let dirY: Float64Array | null = null;
 	if (ds > 0) {
 		const window = HEAD_LEN * Math.max(smoothScale, 0);
 		const [head, holdUntil] = headDirection(sx, sy, cum, window, finished);
+		const rcum = new Float64Array(n);
+		for (let i = 1; i < n; i++) rcum[i] = rcum[i - 1] + steps[i];
+		// A nib wider than NIB_RATE_WIDTH takes proportionally longer to open and close.
+		const zoom = Math.max(smoothScale, 0);
 		dirY = nibDirection(
+			rawX,
+			rawY,
+			rcum,
 			ty,
 			dirSteps,
-			OPEN_LEN * Math.max(smoothScale, 0),
-			CLOSE_LEN * Math.max(smoothScale, 0),
+			Math.max(OPEN_LEN * zoom, (OPEN_LEN / NIB_RATE_WIDTH) * baseWidth),
+			Math.max(CLOSE_LEN * zoom, (CLOSE_LEN / NIB_RATE_WIDTH) * baseWidth),
+			Math.max(REVERSAL_MIN_WAIT * zoom, REVERSAL_WAIT * baseWidth),
 			head,
 			holdUntil,
 		);
@@ -389,6 +520,8 @@ export function buildStrokeGeometry(stroke: StrokeItem): StrokeGeometry {
 		m: c.pressure_min_factor,
 		ds: c.direction_strength,
 		speedStrength: c.speed_strength ?? (stroke.tool === "speed" ? 0.8 : 0),
+		speedTop: c.speed_top ?? SPEED_HI,
+		speedSmoothing: c.speed_smoothing ?? DEFAULT_SPEED_SMOOTHING,
 		taperEnabled: c.taper_enabled ?? stroke.tool === "taper",
 		taperMinFactor: c.taper_min_factor ?? 0.3,
 		speedScale: stroke.speed_scale ?? 1,

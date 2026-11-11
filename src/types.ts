@@ -10,8 +10,10 @@ export interface StrokeConfig {
 	pressure_enabled: boolean;
 	pressure_min_factor: number;
 	direction_strength: number;
-	rgba: Rgba;
+	rgba?: Rgba; // absent on old strokes, which load as the legacy green
 	speed_strength?: number;
+	speed_smoothing?: number; // blur of the speed pen's width along the path, in pen widths
+	speed_top?: number; // speed in dp/ms where the speed pen is thinnest
 	taper_enabled?: boolean;
 	taper_min_factor?: number;
 	neon?: boolean;
@@ -26,10 +28,11 @@ export interface StrokeItem {
 	kind: "stroke";
 	tool: string; // "pen", "dashed", "calligraphy", "speed", "taper", "highlighter"
 	config: StrokeConfig;
-	samples: number[][]; // [x, y, p] or [x, y, p, t]
+	samples: number[][]; // [x, y, p], or [x, y, p, t, w] on the speed pen, w its kept width factor
 	smooth_scale?: number;
 	straight?: boolean;
 	speed_scale?: number;
+	cuts?: number[][]; // [x, y, nx, ny] edges Insert space cut the ink along; it shows only behind each normal
 }
 
 export interface ShapeItem {
@@ -57,6 +60,8 @@ export interface ImageItem {
 	src_h: number;
 	angle: number; // radians, clockwise, about the rect center
 	orientation?: number; // extra quarter-turn in degrees (0/90/180/270)
+	flip?: string; // "x", "y" or "xy", mirrored after orientation and before angle
+	part?: [number, number, number, number]; // x, y, w, h fractions of the image the rect shows
 }
 
 export interface TableItem {
@@ -85,6 +90,7 @@ export interface TextItem {
 	strike?: boolean;
 	align?: TextAlign;
 	math?: boolean; // text is LaTeX, drawn as a formula
+	link?: string; // "xnotes-doc:..." links to a stored document and draw a paperclip
 }
 
 // A dropped colour's area: an SVG path in the unit box, stretched over rect.
@@ -106,6 +112,14 @@ export interface Page {
 	pdf_turn?: number; // clockwise quarter turns of the PDF page
 	items: Item[];
 	style?: PageStyle; // per-field override; missing fields inherit from the document style
+	rooms?: Room[];
+}
+
+// Blank room Insert space opened: a band `size` px tall from `at` px down, or wide from `at` px across when sideways.
+export interface Room {
+	at: number;
+	size: number;
+	sideways?: boolean;
 }
 
 export interface PageStyle {
@@ -114,6 +128,7 @@ export interface PageStyle {
 	template?: string; // any other template, which only the app draws
 	spacing?: number;
 	pattern_color?: Rgba; // defaults to grey 50% (150,150,150,128)
+	text_color?: Rgba; // the page's own flow text colour
 }
 
 export interface Manifest {

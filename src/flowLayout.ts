@@ -652,10 +652,11 @@ export function paintFlowPage(
 	page: PageFlow,
 	flow: TextFlow,
 	paper: Rgba,
+	textColor: Rgba | undefined,
 	math: MathPlacement[],
 ): void {
 	const dark = isDark(paper);
-	const ink: Rgba = flow.defaultColor ?? (dark ? [236, 236, 236, 255] : [28, 28, 28, 255]);
+	const ink: Rgba = textColor ?? flow.defaultColor ?? (dark ? [236, 236, 236, 255] : [28, 28, 28, 255]);
 	const rule: Rgba = dark ? [140, 140, 140, 255] : [100, 100, 100, 255];
 	const fill = (x: number, y: number, w: number, h: number, c: Rgba) => {
 		ctx.fillStyle = rgbaCss(c);
